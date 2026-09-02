@@ -1170,7 +1170,7 @@ packages:
     description:
       path: media_kit
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.1.11"
@@ -1179,7 +1179,7 @@ packages:
     description:
       path: "libs/android/media_kit_libs_android_video"
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.3.7"
@@ -1188,7 +1188,7 @@ packages:
     description:
       path: "libs/ios/media_kit_libs_ios_video"
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.1.4"
@@ -1213,7 +1213,7 @@ packages:
     description:
       path: "libs/universal/media_kit_libs_video"
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.5"
@@ -1222,7 +1222,7 @@ packages:
     description:
       path: "libs/windows/media_kit_libs_windows_video"
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.10"
@@ -1231,7 +1231,7 @@ packages:
     description:
       path: media_kit_native_event_loop
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.9"
@@ -1240,7 +1240,7 @@ packages:
     description:
       path: media_kit_video
       ref: "version_1.2.5"
-      resolved-ref: 0f082cbfa362602f98c84e4e8acf5fb9b46b8279
+      resolved-ref: d6dc4f3caaa142a1811c3b1ac1cacf31506b7a40
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.2.5"
