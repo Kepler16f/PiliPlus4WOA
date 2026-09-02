@@ -35,8 +35,10 @@ jobs:
              git -C C:\flutter fetch --tags
              git -C C:\flutter checkout 3.47.2
           }
-          # Let Flutter bootstrap its native (arm64) Dart SDK in the background-free way:
+          # Let Flutter bootstrap its native (arm64) Dart SDK:
           & C:\flutter\bin\flutter --version
+          # patch.ps1 uses FLUTTER_ROOT to locate the Flutter source tree
+          Add-Content -Path $env:GITHUB_ENV -Value "FLUTTER_ROOT=C:\flutter" -Encoding utf8
 
       - name: Add Inno Setup, NuGet and 7-Zip
         shell: pwsh
