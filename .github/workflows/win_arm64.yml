@@ -89,7 +89,8 @@ jobs:
           $displayName = "PiliPlus"
           $publisher = "dom"
           $publisherUrl = "https://github.com/bggRGjQaUbCoE/PiliPlus"
-          $setupIcon = "windows\runner\resources\app_icon.ico"
+          $setupIcon = (Resolve-Path "windows\runner\resources\app_icon.ico").Path
+          $issOutDir = (Resolve-Path "windows\packaging\exe").Path
           $exeName = "piliplus.exe"
           $buildDir = Resolve-Path "build\windows\arm64\runner\Release"
           $version = $env:version
@@ -109,6 +110,7 @@ jobs:
           $realIss = $realIss.Replace('ArchitecturesAllowed=x64', 'ArchitecturesAllowed=arm64')
           $realIss = $realIss.Replace('ArchitecturesInstallIn64BitMode=x64', 'ArchitecturesInstallIn64BitMode=arm64')
           $realIss = $realIss.Replace('{{SOURCE_DIR}}', $buildDir)
+          $realIss = $realIss.Replace('OutputDir=.', "OutputDir=$issOutDir")
 
           $outPath = "windows\packaging\exe\generated_arm64.iss"
           Set-Content -Path $outPath -Value $realIss -Encoding UTF8
