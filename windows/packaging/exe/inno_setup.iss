@@ -15,8 +15,8 @@ SolidCompression=yes
 SetupIconFile={{SETUP_ICON_FILE}}
 WizardStyle=modern
 PrivilegesRequired={{PRIVILEGES_REQUIRED}}
-ArchitecturesAllowed=arm64
-ArchitecturesInstallIn64BitMode=arm64
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 
 [Code]
 procedure KillOldProcess;

@@ -99,6 +99,9 @@ jobs:
           $realIss = $realIss.Replace('{{SETUP_ICON_FILE}}', $setupIcon)
           $realIss = $realIss.Replace('{{PRIVILEGES_REQUIRED}}', "admin")
           $realIss = $realIss.Replace('{{EXECUTABLE_NAME}}', $exeName)
+          # Force ARM64 architecture for the installer (shared template defaults to x64)
+          $realIss = $realIss.Replace('ArchitecturesAllowed=x64', 'ArchitecturesAllowed=arm64')
+          $realIss = $realIss.Replace('ArchitecturesInstallIn64BitMode=x64', 'ArchitecturesInstallIn64BitMode=arm64')
           $realIss = $realIss.Replace('{{SOURCE_DIR}}', $buildDir)
 
           $outPath = "windows\packaging\exe\generated_arm64.iss"
