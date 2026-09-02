@@ -1,0 +1,160 @@
+name: Build for Windows ARM64
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "tag"
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+
+jobs:
+  build-windows-arm64-app:
+    name: Release Windows ARM64
+    runs-on: windows-11-arm
+    permissions: write-all
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter (ARM64 native, manual install)
+        shell: pwsh
+        run: |
+          # subosito/flutter-action does not yet publish ARM64 Windows Flutter
+          # archives (releases_windows.json only has x64). Flutter bootstraps the
+          # correct native Dart SDK from the git tag based on PROCESSOR_ARCHITECTURE,
+          # which is ARM64 on this runner. So we install Flutter directly.
+          cd C:\
+          if (-not (Test-Path C:\flutter)) {
+             git clone --depth 1 --branch 3.47.2 https://github.com/flutter/flutter.git C:\flutter
+          } else {
+             git -C C:\flutter fetch --tags
+             git -C C:\flutter checkout 3.47.2
+          }
+          # Let Flutter bootstrap its native (arm64) Dart SDK in the background-free way:
+          & C:\flutter\bin\flutter --version
+
+      - name: Add Inno Setup, NuGet and 7-Zip
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --limit-output
+          choco install nuget-commandline --yes --limit-output
+          choco install 7zip.portable --yes --limit-output
+          # Make 7z and nuget discoverable by CMake's find_program
+          $7zPath = "C:\ProgramData\chocolatey\lib\7zip.portable\tools"
+          if (Test-Path "$7zPath\7z.exe") {
+            Add-Content -Path $env:GITHUB_PATH -Value $7zPath -Encoding utf8
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\ProgramData\chocolatey\bin" -Encoding utf8
+
+      - name: Add Chinese language file for Inno Setup
+        run: |
+          Copy-Item "windows/packaging/exe/ChineseSimplified.isl" "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+        shell: pwsh
+
+      - name: Set and Extract version
+        shell: pwsh
+        run: lib/scripts/build.ps1
+
+      - name: Apply Patch
+        shell: pwsh
+        run: lib/scripts/patch.ps1 windows
+
+      - name: Flutter pub get
+        run: flutter pub get
+        shell: pwsh
+
+      - name: Build Windows ARM64
+        run: |
+          flutter build windows --release --dart-define-from-file=pili_release.json --no-pub
+        shell: pwsh
+
+      - name: Generate Inno Setup script
+        shell: pwsh
+        run: |
+          $innoTemplate = Get-Content "windows/packaging/exe/inno_setup.iss" -Raw
+          $makeConfig = Get-Content "windows/packaging/exe/make_config.yaml" -Raw
+          # Parse make_config values
+          $appId = "5ef970f9-2b9e-4155-b7d6-a9d4dbd6b226"
+          $displayName = "PiliPlus"
+          $publisher = "dom"
+          $publisherUrl = "https://github.com/bggRGjQaUbCoE/PiliPlus"
+          $setupIcon = "windows\runner\resources\app_icon.ico"
+          $exeName = "piliplus.exe"
+          $buildDir = Resolve-Path "build\windows\arm64\runner\Release"
+          $version = $env:version
+
+          $realIss = $innoTemplate
+          $realIss = $realIss.Replace('{{APP_ID}}', $appId)
+          $realIss = $realIss.Replace('{{APP_VERSION}}', $version)
+          $realIss = $realIss.Replace('{{DISPLAY_NAME}}', $displayName)
+          $realIss = $realIss.Replace('{{PUBLISHER_NAME}}', $publisher)
+          $realIss = $realIss.Replace('{{PUBLISHER_URL}}', $publisherUrl)
+          $realIss = $realIss.Replace('{{INSTALL_DIR_NAME}}', "{autopf}\$displayName")
+          $realIss = $realIss.Replace('{{OUTPUT_BASE_FILENAME}}', "PiliPlus_windows_${version}_arm64_setup")
+          $realIss = $realIss.Replace('{{SETUP_ICON_FILE}}', $setupIcon)
+          $realIss = $realIss.Replace('{{PRIVILEGES_REQUIRED}}', "admin")
+          $realIss = $realIss.Replace('{{EXECUTABLE_NAME}}', $exeName)
+          # Force ARM64 architecture for the installer (shared template defaults to x64)
+          $realIss = $realIss.Replace('ArchitecturesAllowed=x64', 'ArchitecturesAllowed=arm64')
+          $realIss = $realIss.Replace('ArchitecturesInstallIn64BitMode=x64', 'ArchitecturesInstallIn64BitMode=arm64')
+          $realIss = $realIss.Replace('{{SOURCE_DIR}}', $buildDir)
+
+          $outPath = "windows\packaging\exe\generated_arm64.iss"
+          Set-Content -Path $outPath -Value $realIss -Encoding UTF8
+          Write-Host "Generated Inno script: $outPath"
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $issPath = Resolve-Path "windows\packaging\exe\generated_arm64.iss"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
+
+      - name: Prepare portable zip
+        shell: pwsh
+        run: |
+          $buildDir = Resolve-Path "build\windows\arm64\runner\Release"
+          $zipName = "PiliPlus_windows_$env:version_arm64_portable.zip"
+          Compress-Archive -Path "$buildDir\*" -DestinationPath $zipName
+
+      - name: Collect Inno output
+        shell: pwsh
+        run: |
+          $setupExe = Get-ChildItem -Path "windows\packaging\exe" -Filter "PiliPlus_windows_*_arm64_setup.exe" | Select-Object -First 1
+          if ($setupExe) {
+            $destDir = "PiliPlus-Win-Setup"
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Move-Item $setupExe.FullName "$destDir\" -Force
+            Write-Host "Setup exe: $($setupExe.Name)"
+          } else {
+            Write-Error "Setup exe not found"
+            Get-ChildItem "windows\packaging\exe" -Filter "*.exe" | Select-Object Name
+          }
+
+      - name: Release
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          files: |
+            PiliPlus_windows_*_arm64_portable.zip
+            PiliPlus-Win-Setup/PiliPlus_windows_*_arm64_setup.exe
+
+      - name: Upload arm64 portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: Windows-portable-arm64-release
+          path: PiliPlus_windows_*_arm64_portable.zip
+
+      - name: Upload arm64 setup exe
+        uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          name: Windows-setup-arm64-release
+          path: PiliPlus-Win-Setup/PiliPlus_windows_*_arm64_setup.exe
