@@ -39,6 +39,8 @@ jobs:
           & C:\flutter\bin\flutter --version
           # patch.ps1 uses FLUTTER_ROOT to locate the Flutter source tree
           Add-Content -Path $env:GITHUB_ENV -Value "FLUTTER_ROOT=C:\flutter" -Encoding utf8
+          # Put flutter on PATH (patch.ps1 and the build step call it bare)
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\flutter\bin" -Encoding utf8
 
       - name: Add Inno Setup, NuGet and 7-Zip
         shell: pwsh
