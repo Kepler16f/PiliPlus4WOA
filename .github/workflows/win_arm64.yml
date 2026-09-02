@@ -74,10 +74,9 @@ jobs:
 
       - name: Build Windows ARM64
         run: |
-          # CMAKE_POLICY_VERSION_MINIMUM keeps CMake 4.x from turning plugin
-          # warnings (e.g. add_custom_command(TARGET..DEPENDS) CMP0175) into
-          # hard failures, matching the older policy inappwebview expects.
-          flutter build windows --release --dart-define-from-file=pili_release.json --no-pub --cmake-args=-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          # CMake 4.x policy compatibility is handled in windows/CMakeLists.txt
+          # (CMAKE_POLICY_VERSION_MINIMUM cache var + cmake_policy(SET CMP0175 OLD)).
+          flutter build windows --release --dart-define-from-file=pili_release.json --no-pub
         shell: pwsh
 
       - name: Generate Inno Setup script

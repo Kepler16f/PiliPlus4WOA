@@ -4,7 +4,12 @@ cmake_minimum_required(VERSION 3.14)
 # CMake 4.x compatibility: keep newer policies (e.g. CMP0175, added 4.0) on
 # their pre-4.0 behavior so third-party plugin CMake (flutter_inappwebview,
 # media_kit) that uses add_custom_command(...DEPENDS) builds on CMake >= 4.
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+# Policy state is inherited by plugin subdirectories; the cache variable
+# additionally covers plugins that read it themselves.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+if(POLICY CMP0175)
+  cmake_policy(SET CMP0175 OLD)
+endif()
 
 project(piliplus LANGUAGES CXX)
 
