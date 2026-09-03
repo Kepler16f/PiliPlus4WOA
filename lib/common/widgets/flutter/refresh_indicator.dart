@@ -30,14 +30,16 @@ double get displacement => _displacement;
 set displacement(double value) {
   if (_displacement == value) return;
   _displacement = value;
-  _refreshDragExtent = (value + kIndicatorSize) * _kDragSizeFactorLimit;
 }
 
 // The over-scroll distance that moves the indicator to its maximum
 // displacement, as a percentage of the scrollable's container extent.
-double _refreshDragExtent =
-    (_displacement + kIndicatorSize) * _kDragSizeFactorLimit;
-double get refreshDragExtent => _refreshDragExtent;
+// 触摸下拉刷新优化开启时，使用移动端默认位移使下拉更省力（ARM64 修改版特有）。
+double get refreshDragExtent {
+  final double effectiveDisplacement =
+      Pref.touchRefreshOptimization ? 20.0 : _displacement;
+  return (effectiveDisplacement + kIndicatorSize) * _kDragSizeFactorLimit;
+}
 // How much the scroll's drag gesture can overshoot the RefreshIndicator's
 // displacement; max displacement = _kDragSizeFactorLimit * displacement.
 const double _kDragSizeFactorLimit = 1.5;
@@ -311,13 +313,33 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     // If the notification.dragDetails is null, this scroll is not triggered by
     // user dragging. It may be a result of ScrollController.jumpTo or ballistic scroll.
     // In this case, we don't want to trigger the refresh indicator.
-    return _status == null &&
-        ((notification is ScrollStartNotification &&
-                notification.dragDetails != null) ||
-            (notification is ScrollUpdateNotification &&
-                notification.dragDetails != null)) &&
-        notification.metrics.extentBefore == 0.0 &&
-        _start();
+    final bool isUserDrag =
+        (notification is ScrollStartNotification &&
+            notification.dragDetails != null) ||
+        (notification is ScrollUpdateNotification &&
+            notification.dragDetails != null);
+    if (!isUserDrag || notification.metrics.extentBefore != 0.0) {
+      return false;
+    }
+
+    // ARM64 touch fix: a previous gesture can leave the state machine stuck in
+    // a non-null status (e.g. a drag that never finished cleanly, or a dismiss
+    // animation that was interrupted), which makes every later pull a no-op.
+    // Recover from stale states when a fresh drag starts, but never interrupt
+    // a refresh/snap that is still in progress.
+    if (_status != null) {
+      if (notification is ScrollStartNotification &&
+          (_status == RefreshIndicatorStatus.drag ||
+              _status == RefreshIndicatorStatus.done ||
+              _status == RefreshIndicatorStatus.canceled)) {
+        _dragOffset = null;
+        _status = null;
+      } else {
+        return false;
+      }
+    }
+
+    return _start();
   }
 
   bool _handleScrollNotification(ScrollNotification notification) {
@@ -392,7 +414,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
 
   void _checkDragOffset() {
     assert(_status == RefreshIndicatorStatus.drag);
-    double newValue = _dragOffset! / _refreshDragExtent;
+    double newValue = _dragOffset! / refreshDragExtent;
     _positionController.value = clampDouble(
       newValue,
       0.0,

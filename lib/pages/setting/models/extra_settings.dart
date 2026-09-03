@@ -246,6 +246,14 @@ List<SettingsModel> get extraSettings => [
     setKey: SettingBoxKey.openInBrowser,
     defaultVal: false,
   ),
+  if (Platform.isWindows)
+    const SwitchModel(
+      title: '触摸下拉刷新优化',
+      subtitle: '缩短触摸下拉刷新触发距离（ARM64 修改版特有）',
+      leading: Icon(Icons.touch_app),
+      setKey: SettingBoxKey.touchRefreshOptimization,
+      defaultVal: false,
+    ),
   NormalModel(
     title: '横向滑动阈值',
     getSubtitle: () => '当前:「${Pref.touchSlopH}」，系统默认值: $deviceTouchSlop',
