@@ -69,7 +69,7 @@ bool _computeHitSlop(
 
 bool _calcAngle(Offset initialPosition, Offset lastPosition) {
   final offset = lastPosition - initialPosition;
-  return offset.dx.abs() > offset.dy.abs() * 3;
+  return offset.dx.abs() > offset.dy.abs() * 1.5;
 }
 
 final deviceTouchSlop = _calcDeviceTouchSlop();

@@ -1024,6 +1024,12 @@ abstract final class Pref {
     defaultValue: deviceTouchSlop + 6.0,
   );
 
+  /// ARM64 修改版特有：触摸下拉刷新优化（缩短下拉触发距离）
+  static bool get touchRefreshOptimization => _setting.get(
+    SettingBoxKey.touchRefreshOptimization,
+    defaultValue: false,
+  );
+
   static bool get saveReply =>
       _setting.get(SettingBoxKey.saveReply, defaultValue: true);
 
