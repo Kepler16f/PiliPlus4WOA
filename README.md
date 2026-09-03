@@ -1,3 +1,22 @@
+# PiliPlus (Windows ARM64 支持分支)
+
+本分支在 [原项目 bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus) 的基础上，主要新增了对 **Windows ARM64（WoA，如骁龙 X 系列设备）** 平台的构建与运行支持，目标是在基于 ARM 架构的 Windows 设备上原生安装和运行 PiliPlus。
+
+## 对原项目的主要改动
+
+1. **新增 ARM64 构建工作流** [`.github/workflows/win_arm64.yml`](.github/workflows/win_arm64.yml)：使用 GitHub 官方 ARM64 宿主 runner（`windows-11-arm`），手动安装**原生 ARM64 版 Flutter**，编译 `windows-arm64` 目标后通过 Inno Setup 打包出 ARM64 安装程序 `.exe` 与便携版 `.zip`。
+2. **主工作流接入** [`.github/workflows/build.yml`](.github/workflows/build.yml)：增加 `build_win_arm64` 触发开关。
+3. **media_kit 依赖指向增强 fork** [Kepler16f/media-kit](https://github.com/Kepler16f/media-kit)：在 `media_kit_libs_windows_video` 的 [CMakeLists.txt](https://github.com/Kepler16f/media-kit/blob/version_1.2.5/libs/windows/media_kit_libs_windows_video/windows/CMakeLists.txt) 中加入 ARM64 分支，构建时自动选用 **aarch64 版 libmpv** 与 **ARM64 版 ANGLE（libEGL/libGLESv2）**，并修复 7-Zip 解压顺序等问题（方案参考自 media-kit 官方 [PR #1381](https://github.com/media-kit/media-kit/pull/1381)）。
+4. **CMake 4.x 兼容** [windows/CMakeLists.txt](windows/CMakeLists.txt)：添加 `CMAKE_POLICY_VERSION_MINIMUM` 与 `cmake_policy(SET CMP0175 OLD)`，避免第三方插件在 CMake ≥ 4 的 runner 上因策略变更被误判为失败。
+
+> 相关仓库：当前分支仓库 [Kepler16f/PiliPlus4WOA](https://github.com/Kepler16f/PiliPlus4WOA) · media-kit 增强 fork [Kepler16f/media-kit](https://github.com/Kepler16f/media-kit) · 上游原项目 [bggRGjQaUbCoE/PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)
+
+本分支改动聚焦于 Windows ARM64 支持，其余平台与功能与原项目保持一致。
+
+---
+
+以下为原项目readme
+
 <div align="center">
     <img width="200" height="200" src="assets/images/logo/logo.png">
 </div>
