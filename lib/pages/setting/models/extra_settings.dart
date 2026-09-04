@@ -246,14 +246,22 @@ List<SettingsModel> get extraSettings => [
     setKey: SettingBoxKey.openInBrowser,
     defaultVal: false,
   ),
-  if (Platform.isWindows)
+  if (Platform.isWindows) ...[
     const SwitchModel(
-      title: '触摸下拉刷新优化',
+      title: '*触摸下拉刷新优化',
       subtitle: '缩短触摸下拉刷新触发距离（ARM64 修改版特有）',
       leading: Icon(Icons.touch_app),
       setKey: SettingBoxKey.touchRefreshOptimization,
       defaultVal: false,
     ),
+    const SwitchModel(
+      title: '*触摸调试日志',
+      subtitle: '将触摸事件写入系统临时目录，便于定位触摸问题（ARM64 修改版特有）',
+      leading: Icon(Icons.bug_report_outlined),
+      setKey: SettingBoxKey.touchDebugLog,
+      defaultVal: false,
+    ),
+  ],
   NormalModel(
     title: '横向滑动阈值',
     getSubtitle: () => '当前:「${Pref.touchSlopH}」，系统默认值: $deviceTouchSlop',

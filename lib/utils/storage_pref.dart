@@ -1030,6 +1030,12 @@ abstract final class Pref {
     defaultValue: false,
   );
 
+  /// ARM64 修改版特有：触摸调试日志开关
+  static bool get touchDebugLog => _setting.get(
+    SettingBoxKey.touchDebugLog,
+    defaultValue: false,
+  );
+
   static bool get saveReply =>
       _setting.get(SettingBoxKey.saveReply, defaultValue: true);
 
