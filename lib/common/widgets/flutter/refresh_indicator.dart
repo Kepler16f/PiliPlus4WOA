@@ -371,6 +371,23 @@ class RefreshIndicatorState extends State<RefreshIndicator>
         _checkDragOffset();
       }
     } else if (notification is ScrollEndNotification) {
+      // ARM64 touch fix: even when the state machine is not in 'drag' (e.g. a
+      // touch drag was cancelled before the drag ever reached the scrollable),
+      // make sure a stuck indicator always resets on finger lift.
+      if (_status == RefreshIndicatorStatus.drag ||
+          _status == RefreshIndicatorStatus.snap ||
+          _status == RefreshIndicatorStatus.done ||
+          _status == RefreshIndicatorStatus.canceled) {
+        if (_status == RefreshIndicatorStatus.drag) {
+          if (_valueColor.value!.a == _effectiveValueColor.a) {
+            _show();
+          } else {
+            _dismiss(RefreshIndicatorStatus.canceled);
+          }
+        } else {
+          _dismiss(RefreshIndicatorStatus.canceled);
+        }
+      }
       switch (_status) {
         case RefreshIndicatorStatus.drag:
           if (_valueColor.value!.a == _effectiveValueColor.a) {
