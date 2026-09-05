@@ -12,6 +12,7 @@ import 'package:PiliPlus/common/widgets/scroll_physics.dart'
     show BouncingScrollPhysicsExt;
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
+import 'package:PiliPlus/utils/touch_debug_log.dart';
 import 'package:extended_nested_scroll_view/refresh.dart';
 import 'package:flutter/foundation.dart' show clampDouble;
 import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
@@ -346,6 +347,14 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     if (!widget.notificationPredicate(notification)) {
       return false;
     }
+    TouchDebugLog.log(
+      'Scroll ${notification.runtimeType} '
+      'drag=${notification is ScrollUpdateNotification ? notification.dragDetails != null : notification is ScrollStartNotification ? notification.dragDetails != null : '-'} '
+      'pixels=${notification.metrics.pixels.toStringAsFixed(1)} '
+      'extentBefore=${notification.metrics.extentBefore.toStringAsFixed(1)} '
+      'status=$_status '
+      'dragOffset=${_dragOffset?.toStringAsFixed(1)}',
+    );
     if (_shouldStart(notification)) {
       setState(() {
         _status = RefreshIndicatorStatus.drag;
@@ -374,19 +383,16 @@ class RefreshIndicatorState extends State<RefreshIndicator>
       // ARM64 touch fix: even when the state machine is not in 'drag' (e.g. a
       // touch drag was cancelled before the drag ever reached the scrollable),
       // make sure a stuck indicator always resets on finger lift.
-      if (_status == RefreshIndicatorStatus.drag ||
-          _status == RefreshIndicatorStatus.snap ||
-          _status == RefreshIndicatorStatus.done ||
-          _status == RefreshIndicatorStatus.canceled) {
-        if (_status == RefreshIndicatorStatus.drag) {
-          if (_valueColor.value!.a == _effectiveValueColor.a) {
-            _show();
-          } else {
-            _dismiss(RefreshIndicatorStatus.canceled);
-          }
+      if (_status == RefreshIndicatorStatus.drag) {
+        if (_valueColor.value!.a == _effectiveValueColor.a) {
+          _show();
         } else {
           _dismiss(RefreshIndicatorStatus.canceled);
         }
+      } else if (_status == RefreshIndicatorStatus.snap ||
+          _status == RefreshIndicatorStatus.done ||
+          _status == RefreshIndicatorStatus.canceled) {
+        _dismiss(RefreshIndicatorStatus.canceled);
       }
       switch (_status) {
         case RefreshIndicatorStatus.drag:
@@ -479,6 +485,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   void _show() {
     assert(_status != RefreshIndicatorStatus.refresh);
     assert(_status != RefreshIndicatorStatus.snap);
+    TouchDebugLog.log('RefreshIndicator._show (start refresh)');
     final Completer<void> completer = Completer<void>();
     _pendingRefreshFuture = completer.future;
     _status = RefreshIndicatorStatus.snap;
@@ -599,6 +606,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   }
 
   bool _onDrag(double offset) {
+    TouchDebugLog.log('_onDrag offset=$offset status=$_status pos=${_positionController.value.toStringAsFixed(2)}');
     if (_positionController.value > 0.0 && _status == .drag) {
       _dragOffset = _dragOffset! + offset;
       _checkDragOffset();
@@ -606,6 +614,26 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     }
     return false;
   }
+
+  // ARM64 touch fix: reset a stuck state machine before a new drag begins so
+  // that pull-to-refresh can never permanently stop working after a gesture
+  // was interrupted. Only resets idle/stale states, never an in-flight
+  // refresh/snap animation.
+  // void _ensureReadyForNewGesture() {
+  //   if (_status == null) return;
+  //   switch (_status!) {
+  //     case RefreshIndicatorStatus.drag:
+  //     case RefreshIndicatorStatus.done:
+  //     case RefreshIndicatorStatus.canceled:
+  //       _dragOffset = null;
+  //       setState(() {
+  //         _status = null;
+  //       });
+  //     case RefreshIndicatorStatus.snap:
+  //     case RefreshIndicatorStatus.refresh:
+  //       break;
+  //   }
+  // }
 
   // late final _refreshKey = GlobalKey();
   // Widget _m3eRefreshProgressIndicator(bool showIndeterminateIndicator) {
