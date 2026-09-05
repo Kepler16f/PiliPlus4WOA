@@ -740,6 +740,14 @@ class PlPlayerController with BlockConfigMixin {
       opt['autosync'] = autosync;
     }
 
+    // ARM64 修改版：全平台开启 mpv 日志（便于定位播放器崩溃），
+    // 同时兜底 log-level，即使 kDebugMode 为 false 也能拿到崩溃前线索。
+    if (Platform.isWindows) {
+      opt['log-level'] = 'v';
+      opt['keep-open'] = 'yes';
+      opt['force-window'] = 'no';
+    }
+
     final player = await Player.create(
       configuration: PlayerConfiguration(
         logLevel: kDebugMode ? .warn : .error,
