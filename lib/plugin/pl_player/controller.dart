@@ -990,17 +990,16 @@ class PlPlayerController with BlockConfigMixin {
           isLive,
         );
       }),
-      if (kDebugMode)
-        stream.log.listen(((PlayerLog log) {
-          if (log.level == 'error' || log.level == 'fatal') {
-            Utils.reportError(
-              '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
-              null,
-            );
-          } else {
-            debugPrint(log.toString());
-          }
-        })),
+      stream.log.listen(((PlayerLog log) {
+        if (log.level == 'error' || log.level == 'fatal') {
+          Utils.reportError(
+            '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
+            null,
+          );
+        } else if (kDebugMode) {
+          debugPrint(log.toString());
+        }
+      })),
       stream.error.listen((String event) {
         if (dataSource is FileSource &&
             event.startsWith("Failed to open file")) {
