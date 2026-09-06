@@ -87,8 +87,8 @@ jobs:
           # Parse make_config values
           $appId = "5ef970f9-2b9e-4155-b7d6-a9d4dbd6b226"
           $displayName = "PiliPlus"
-          $publisher = "dom"
-          $publisherUrl = "https://github.com/bggRGjQaUbCoE/PiliPlus"
+          $publisher = "Kepler16f"
+          $publisherUrl = "https://github.com/Kepler16f/PiliPlus4WOA"
           $setupIcon = (Resolve-Path "windows\runner\resources\app_icon.ico").Path
           $issOutDir = (Resolve-Path "windows\packaging\exe").Path
           $exeName = "piliplus.exe"
