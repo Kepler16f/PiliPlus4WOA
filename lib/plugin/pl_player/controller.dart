@@ -877,6 +877,30 @@ class PlPlayerController with BlockConfigMixin {
     return null;
   }
 
+  // ARM64 修改版：判断是否为「播放中途网络连接被重置」类错误。
+  // mpv 对这些错误的字符串前缀不固定（可能是 tls: / ffmpeg: tls: /
+  // Error number -10054），统一用 contains 匹配。
+  static bool _isNetworkResetError(String message) {
+    return message.contains('tls: IO error') ||
+        message.contains('Error number -10054') ||
+        message.contains('Connection reset') ||
+        message.contains('ffurl_read returned');
+  }
+
+  // ARM64 修改版：网络断连后从当前进度自动重连续播（10 秒节流）。
+  void _scheduleReconnect() {
+    EasyThrottle.throttle(
+      'controllerStream.error.reconnect',
+      const Duration(milliseconds: 10000),
+      () {
+        Future.delayed(
+          const Duration(milliseconds: 1500),
+          refreshPlayer,
+        );
+      },
+    );
+  }
+
   // 开始播放
   Future<void> _initializePlayer() async {
     if (_instance == null) return;
@@ -992,6 +1016,11 @@ class PlPlayerController with BlockConfigMixin {
       }),
       stream.log.listen(((PlayerLog log) {
         if (log.level == 'error' || log.level == 'fatal') {
+          // 网络断连类错误也走自动重连（log 通道前缀可能是 ffmpeg: tls: IO error）
+          if (_isNetworkResetError('${log.prefix}: ${log.text}')) {
+            _scheduleReconnect();
+            return;
+          }
           Utils.reportError(
             '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
             null,
@@ -1006,10 +1035,9 @@ class PlPlayerController with BlockConfigMixin {
           return;
         }
         if (isLive) {
-          if (event.startsWith('tcp: ffurl_read returned ') ||
+          if (_isNetworkResetError(event) ||
               event.startsWith("Failed to open https://") ||
-              event.startsWith("Can not open external file https://") ||
-              event.startsWith('tls: IO error')) {
+              event.startsWith("Can not open external file https://")) {
             Future.delayed(const Duration(milliseconds: 3000), refreshPlayer);
           }
           return;
@@ -1040,22 +1068,10 @@ class PlPlayerController with BlockConfigMixin {
               });
             },
           );
-        } else if (event.startsWith('tls: IO error') ||
-            event.startsWith('Error number -10054') ||
-            event.contains('Connection reset') ||
-            event.contains('ffurl_read returned')) {
+        } else if (_isNetworkResetError(event)) {
           // 播放中途网络连接被重置（WSAECONNRESET），从当前进度自动重连续播，
           // 避免播放器卡死。10 秒节流防止频繁重连风暴。
-          EasyThrottle.throttle(
-            'controllerStream.error.reconnect',
-            const Duration(milliseconds: 10000),
-            () {
-              Future.delayed(
-                const Duration(milliseconds: 1500),
-                refreshPlayer,
-              );
-            },
-          );
+          _scheduleReconnect();
         } else if (event.startsWith('Could not open codec')) {
           SmartDialog.showToast('无法加载解码器, $event，可能会切换至软解');
         } else if (!onlyPlayAudio.value) {
