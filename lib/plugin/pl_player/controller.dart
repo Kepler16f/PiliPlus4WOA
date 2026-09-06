@@ -1008,7 +1008,8 @@ class PlPlayerController with BlockConfigMixin {
         if (isLive) {
           if (event.startsWith('tcp: ffurl_read returned ') ||
               event.startsWith("Failed to open https://") ||
-              event.startsWith("Can not open external file https://")) {
+              event.startsWith("Can not open external file https://") ||
+              event.startsWith('tls: IO error')) {
             Future.delayed(const Duration(milliseconds: 3000), refreshPlayer);
           }
           return;
@@ -1037,6 +1038,22 @@ class PlPlayerController with BlockConfigMixin {
                   refreshPlayer();
                 }
               });
+            },
+          );
+        } else if (event.startsWith('tls: IO error') ||
+            event.startsWith('Error number -10054') ||
+            event.contains('Connection reset') ||
+            event.contains('ffurl_read returned')) {
+          // 播放中途网络连接被重置（WSAECONNRESET），从当前进度自动重连续播，
+          // 避免播放器卡死。10 秒节流防止频繁重连风暴。
+          EasyThrottle.throttle(
+            'controllerStream.error.reconnect',
+            const Duration(milliseconds: 10000),
+            () {
+              Future.delayed(
+                const Duration(milliseconds: 1500),
+                refreshPlayer,
+              );
             },
           );
         } else if (event.startsWith('Could not open codec')) {
