@@ -22,6 +22,19 @@ abstract final class LoggerUtils {
   static Future<File> getLogsPath() async {
     if (_logFile != null) return _logFile!;
 
+    // ARM64 修改版：崩溃日志同时写入系统临时目录（Windows），
+    // 因为 Documents/PiliPlus 目录在某些环境下不可见/不存在，
+    // 写入 Temp 便于用户快速取回日志定位崩溃。
+    if (Platform.isWindows) {
+      String dir = Directory.systemTemp.path;
+      final String filename = p.join(dir, 'piliplus_crash_log.json');
+      final File file = File(filename);
+      if (!file.existsSync()) {
+        await file.create(recursive: true);
+      }
+      return _logFile = file;
+    }
+
     String dir = (await getApplicationDocumentsDirectory()).path;
     final String filename = p.join(dir, '.pili_logs.json');
     final File file = File(filename);
