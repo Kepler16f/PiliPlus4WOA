@@ -923,6 +923,16 @@ class PlPlayerController with BlockConfigMixin {
   // 彻底重载播放器（重建 mpv 实例），用于重连仍失败的兜底。
   Future<void> _reloadPlayer() async {
     if (dataSource is FileSource) return;
+    // 重建前尝试用当前视频页重新拉取新的播放链接（CDN 可能失效）。
+    // 通过 play 回调定位到当前播放页的 videoDetailController。
+    try {
+      final callback = PlPlayerController._playCallBack;
+      if (callback != null) {
+        await callback.call();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('_reloadPlayer callback failed: $e');
+    }
     _removeListeners();
     await _videoPlayerController?.dispose();
     _videoPlayerController = null;
