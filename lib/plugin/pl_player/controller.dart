@@ -748,14 +748,6 @@ class PlPlayerController with BlockConfigMixin {
       opt['force-window'] = 'no';
     }
 
-    // ARM64 修改版：Windows ARM64 上优先走软解，规避 ANGLE/D3D11VA
-    // 在 WoA 驱动下偶发的解码崩溃（Invalid NAL / No video or audio streams）。
-    // 软解走 S/W 渲染路径，稳定但占 CPU；仅对 ARM64 生效。
-    if (PlatformUtils.isWindowsArm64) {
-      opt['hwdec'] = 'no';
-      opt['video-output'] = 'gpu';
-    }
-
     final player = await Player.create(
       configuration: PlayerConfiguration(
         logLevel: kDebugMode ? .warn : .error,
