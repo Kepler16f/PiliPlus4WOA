@@ -1093,6 +1093,16 @@ class VideoDetailController extends GetxController
 
   late bool continuePlayingPart = Pref.continuePlayingPart;
 
+  // 视频页：重新拉取播放链接并重开播放器（断流/网络异常后调用）。
+  // 通过 PlPlayerController.setPlayCallBack 注册的 play 回调定位到当前
+  // 播放页；此处仅在确实需要重新获取 playurl 时由播放器重连失败触发。
+  Future<void> reloadPlayUrl() async {
+    if (isFileSource) return;
+    _autoPlay.value = true;
+    playedTime = plPlayerController.videoPlayerController?.state.position;
+    await queryVideoUrl(fromReset: true, autoFullScreenFlag: false);
+  }
+
   Future<void> _queryPlayInfo() async {
     vttSubtitles.clear();
     vttSubtitlesIndex.value = 0;
