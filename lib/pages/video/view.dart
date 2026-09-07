@@ -140,6 +140,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     super.initState();
 
     PlPlayerController.setPlayCallBack(playCallBack);
+    PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
     videoDetailController = Get.put(VideoDetailController(), tag: heroTag);
 
     if (videoDetailController.removeSafeArea) {
@@ -207,6 +208,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         ..addPositionListener(positionListener);
     }
     return plPlayerController?.play();
+  }
+
+  // 断流兜底：重新拉取播放链接并重建播放器（由 PlPlayerController 触发）。
+  // 与 playCallBack 不同，这里走 videoDetailController.queryVideoUrl(fromReset)
+  // 重新请求 B 站 playurl，拿到全新有效的 CDN 地址后再续播。
+  Future<void>? reloadPlayUrlCallback() {
+    return videoDetailController.reloadPlayUrl();
   }
 
   // 播放器状态监听
@@ -411,6 +419,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     }
 
     PlPlayerController.setPlayCallBack(playCallBack);
+    PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
 
     introController.startTimer();
 
