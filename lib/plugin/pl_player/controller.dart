@@ -887,19 +887,65 @@ class PlPlayerController with BlockConfigMixin {
         message.contains('ffurl_read returned');
   }
 
-  // ARM64 修改版：网络断连后从当前进度自动重连续播（10 秒节流）。
+  // 是否已有一次自动重连在进行中（防止重连风暴/重复重连）
+  bool _reconnecting = false;
+  int _reconnectAttempts = 0;
+
+  // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
-    EasyThrottle.throttle(
-      'controllerStream.error.reconnect',
-      const Duration(milliseconds: 10000),
-      () {
-        Future.delayed(
-          const Duration(milliseconds: 1500),
-          refreshPlayer,
-        );
-      },
-    );
+    if (_reconnecting) return;
+    _reconnecting = true;
+    _reconnectAttempts = 0;
+    _tryReconnect();
   }
+
+  Future<void> _tryReconnect() async {
+    if (_playerCount == 0) {
+      _reconnecting = false;
+      return;
+    }
+    _reconnectAttempts++;
+    // 前两次快速重连（从当前进度续播）
+    if (_reconnectAttempts <= 2) {
+      await Future.delayed(const Duration(milliseconds: 1500));
+      if (_playerCount == 0) {
+        _reconnecting = false;
+        return;
+      }
+      refreshPlayer();
+      return;
+    }
+    // 超过 2 次仍未成功 → 彻底重建播放器
+    await _reloadPlayer();
+    _reconnecting = false;
+  }
+
+  // 彻底重载播放器（重建 mpv 实例），用于重连仍失败的兜底。
+  Future<void> _reloadPlayer() async {
+    if (dataSource is FileSource) return;
+    _removeListeners();
+    await _videoPlayerController?.dispose();
+    _videoPlayerController = null;
+    _videoController = null;
+    _subscriptions = null;
+    try {
+      final player = await _initPlayer();
+      if (_playerCount == 0) {
+        _removeListeners();
+        player.dispose();
+        return;
+      }
+      _videoPlayerController = player;
+      await _createVideoController(
+        dataSource,
+        _videoPlayerController!.state.position,
+        null,
+      );
+    } catch (e) {
+      if (kDebugMode) debugPrint('_reloadPlayer failed: $e');
+    }
+  }
+
 
   // 开始播放
   Future<void> _initializePlayer() async {
