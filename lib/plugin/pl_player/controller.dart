@@ -436,8 +436,19 @@ class PlPlayerController with BlockConfigMixin {
 
   static PlayCallback? _playCallBack;
 
+  // ARM64 修改版：断流兜底回调，由视频页注册（重新拉取播放链接）。
+  static PlayCallback? _reloadCallBack;
+  static void setReloadCallBack(PlayCallback? reloadCallBack) {
+    _reloadCallBack = reloadCallBack;
+  }
+
   static Future<void>? playIfExists() {
     return _playCallBack?.call();
+  }
+
+  /// ARM64 修改版：让当前视频页重新拉取播放链接并重建播放器。
+  static void refreshPlayUrl() {
+    _reloadCallBack?.call();
   }
 
   // try to get PlayerStatus
@@ -748,14 +759,6 @@ class PlPlayerController with BlockConfigMixin {
       opt['force-window'] = 'no';
     }
 
-    // ARM64 修改版：Windows ARM64 上优先走软解，规避 ANGLE/D3D11VA
-    // 在 WoA 驱动下偶发的解码崩溃（Invalid NAL / No video or audio streams）。
-    // 软解走 S/W 渲染路径，稳定但占 CPU；仅对 ARM64 生效。
-    if (PlatformUtils.isWindowsArm64) {
-      opt['hwdec'] = 'no';
-      opt['video-output'] = 'gpu';
-    }
-
     final player = await Player.create(
       configuration: PlayerConfiguration(
         logLevel: kDebugMode ? .warn : .error,
@@ -931,16 +934,8 @@ class PlPlayerController with BlockConfigMixin {
   // 彻底重载播放器（重建 mpv 实例），用于重连仍失败的兜底。
   Future<void> _reloadPlayer() async {
     if (dataSource is FileSource) return;
-    // 重建前尝试用当前视频页重新拉取新的播放链接（CDN 可能失效）。
-    // 通过 play 回调定位到当前播放页的 videoDetailController。
-    try {
-      final callback = PlPlayerController._playCallBack;
-      if (callback != null) {
-        await callback.call();
-      }
-    } catch (e) {
-      if (kDebugMode) debugPrint('_reloadPlayer callback failed: $e');
-    }
+    // 重建前先让当前视频页重新拉取新的播放链接（CDN URL 可能已失效）。
+    PlPlayerController.refreshPlayUrl();
     _removeListeners();
     await _videoPlayerController?.dispose();
     _videoPlayerController = null;
