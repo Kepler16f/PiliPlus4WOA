@@ -446,10 +446,9 @@ class PlPlayerController with BlockConfigMixin {
     return _playCallBack?.call();
   }
 
-  /// ARM64 修改版：让当前视频页重新拉取播放链接并重建播放器。
-  static void refreshPlayUrl() {
-    _reloadCallBack?.call();
-  }
+  /// ARM64 修改版：让当前视频页重新拉取播放链接并续播。
+  /// 返回回调的 Future，便于调用方（如自动重连）等待完成。
+  static Future<void>? refreshPlayUrl() => _reloadCallBack?.call();
 
   // try to get PlayerStatus
   static PlayerStatus? getPlayerStatusIfExists() {
@@ -751,10 +750,10 @@ class PlPlayerController with BlockConfigMixin {
       opt['autosync'] = autosync;
     }
 
-    // ARM64 修改版：全平台开启 mpv 日志（便于定位播放器崩溃），
-    // 同时兜底 log-level，即使 kDebugMode 为 false 也能拿到崩溃前线索。
+    // ARM64 修改版：Windows 上兜底 keep-open/force-window（保持原有行为）。
+    // 注：mpv 没有 'log-level' 选项（此前误加，已被 mpv 静默忽略，现移除）；
+    // 日志等级由下方 PlayerConfiguration.logLevel 控制。
     if (Platform.isWindows) {
-      opt['log-level'] = 'v';
       opt['keep-open'] = 'yes';
       opt['force-window'] = 'no';
     }
@@ -821,6 +820,12 @@ class PlPlayerController with BlockConfigMixin {
         ...liveBuffer
       else
         ...buffer,
+      // ARM64 修改版：让 ffmpeg 在网络错误（CDN 掐断 TLS / 连接被重置 /
+      // 流提前结束）时自动重连续流，mpv 内部自愈，大多数断流不再
+      // 传导到 Dart 层触发重连。仅对流媒体生效。
+      if (dataSource is! FileSource)
+        'stream-lavf-o':
+            'reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10',
     };
 
     String video = dataSource.videoSource;
@@ -895,16 +900,24 @@ class PlPlayerController with BlockConfigMixin {
     return message.contains('tls: IO error') ||
         message.contains('Error number -10054') ||
         message.contains('Connection reset') ||
-        message.contains('ffurl_read returned');
+        message.contains('ffurl_read returned') ||
+        message.contains('Stream ends prematurely');
   }
 
   // 是否已有一次自动重连在进行中（防止重连风暴/重复重连）
   bool _reconnecting = false;
   int _reconnectAttempts = 0;
+  // 重连冷却：上次发起重连的时间。若距上次不足冷却期则忽略本次错误，
+  // 避免 CDN 短时间反复断流时触发重连风暴（每次重连失败都会堆积泄漏）。
+  DateTime _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _reconnectCooldown = Duration(seconds: 10);
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
     if (_reconnecting) return;
+    final now = DateTime.now();
+    if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
+    _lastReconnectAt = now;
     _reconnecting = true;
     _reconnectAttempts = 0;
     _tryReconnect();
@@ -916,7 +929,12 @@ class PlPlayerController with BlockConfigMixin {
       return;
     }
     _reconnectAttempts++;
-    // 前两次快速重连（从当前进度续播）
+    // 播放已恢复（用户手动重试/缓冲自愈成功）则不再继续。
+    if (playerStatus.isPlaying && !isBuffering.value) {
+      _reconnecting = false;
+      return;
+    }
+    // 前两次快速重连（从当前进度续播，仅重开当前 URL）
     if (_reconnectAttempts <= 2) {
       await Future.delayed(const Duration(milliseconds: 1500));
       if (_playerCount == 0) {
@@ -924,39 +942,15 @@ class PlPlayerController with BlockConfigMixin {
         return;
       }
       refreshPlayer();
+      _reconnecting = false;
       return;
     }
-    // 超过 2 次仍未成功 → 彻底重建播放器
-    await _reloadPlayer();
+    // 快速重连无效 → 让当前视频页重新拉取播放链接（CDN URL 可能已失效），
+    // 由 queryVideoUrl → setDataSource 在现有播放器实例上换源续播。
+    // 不再手动 dispose/重建 mpv：与异步返回的 queryVideoUrl 存在竞态
+    // （双播放器互相覆盖，泄漏 mpv/ANGLE/D3D 资源并导致画面冻结）。
+    await refreshPlayUrl();
     _reconnecting = false;
-  }
-
-  // 彻底重载播放器（重建 mpv 实例），用于重连仍失败的兜底。
-  Future<void> _reloadPlayer() async {
-    if (dataSource is FileSource) return;
-    // 重建前先让当前视频页重新拉取新的播放链接（CDN URL 可能已失效）。
-    PlPlayerController.refreshPlayUrl();
-    _removeListeners();
-    await _videoPlayerController?.dispose();
-    _videoPlayerController = null;
-    _videoController = null;
-    _subscriptions = null;
-    try {
-      final player = await _initPlayer();
-      if (_playerCount == 0) {
-        _removeListeners();
-        player.dispose();
-        return;
-      }
-      _videoPlayerController = player;
-      await _createVideoController(
-        dataSource,
-        _videoPlayerController!.state.position,
-        null,
-      );
-    } catch (e) {
-      if (kDebugMode) debugPrint('_reloadPlayer failed: $e');
-    }
   }
 
 
@@ -1001,6 +995,10 @@ class PlPlayerController with BlockConfigMixin {
       stream.playing.listen((bool playing) {
         WakelockPlus.toggle(enable: playing);
         if (playing) {
+          // ARM64 修改版：播放成功恢复，重置重连冷却/计数，允许下次断流重新计时。
+          _reconnecting = false;
+          _reconnectAttempts = 0;
+          _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
           if (_isAutoEnterPip) {
             if (_isCurrVideoPage) {
               enterPip(autoEnter: true);
