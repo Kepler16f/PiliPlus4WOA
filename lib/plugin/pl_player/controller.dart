@@ -823,9 +823,16 @@ class PlPlayerController with BlockConfigMixin {
       // ARM64 修改版：让 ffmpeg 在网络错误（CDN 掐断 TLS / 连接被重置 /
       // 流提前结束）时自动重连续流，mpv 内部自愈，大多数断流不再
       // 传导到 Dart 层触发重连。仅对流媒体生效。
+      //
+      // 注意：media_kit 用 loadfile 的 options 参数传递，逗号是选项分隔符，
+      // 值内部的逗号必须用 mpv 的 %len% 字符串语法整体编码，
+      // 否则 reconnect_streamed 等会被拆成顶层选项而报 "option not found"
+      // （上一版构建日志已实证）。此 mpv 构建的 https 走 ffmpeg curlproto
+      // （日志可见 "curl: transfer failed"），curl 协议自带断点续传重试，
+      // 但 lavf 层的重连选项仍是必要兜底。
       if (dataSource is! FileSource)
-        'stream-lavf-o':
-            'reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=10',
+        'stream-lavf-o': '%84%reconnect=1,reconnect_streamed=1,'
+            'reconnect_on_network_error=1,reconnect_delay_max=10',
     };
 
     String video = dataSource.videoSource;
@@ -893,15 +900,25 @@ class PlPlayerController with BlockConfigMixin {
     return null;
   }
 
-  // ARM64 修改版：判断是否为「播放中途网络连接被重置」类错误。
+  // ARM64 修改版：判断是否为「播放中途网络连接被重置/断流」类错误。
   // mpv 对这些错误的字符串前缀不固定（可能是 tls: / ffmpeg: tls: /
-  // Error number -10054），统一用 contains 匹配。
+  // Error number -10054 / curl:），统一用 contains 匹配。
+  //
+  // 另外匹配「断流后数据损坏」类错误：curl 断点续传自愈后，解复用器缓存里
+  // 可能残留半截数据，继续喂给 h264 解码器会产生 Invalid NAL / partial file，
+  // 并已在 dump 中证实会触发 libmpv 内部指针损坏而崩溃
+  // （STATUS_DATATYPE_MISALIGNMENT @ libmpv!+0x507B94）。
+  // 检测到这些错误时立即从当前进度重新打开源，丢弃脏数据。
   static bool _isNetworkResetError(String message) {
     return message.contains('tls: IO error') ||
         message.contains('Error number -10054') ||
         message.contains('Connection reset') ||
         message.contains('ffurl_read returned') ||
-        message.contains('Stream ends prematurely');
+        message.contains('Stream ends prematurely') ||
+        message.contains('Invalid NAL unit size') ||
+        message.contains('Error splitting the input into NAL units') ||
+        message.contains('partial file') ||
+        message.contains('missing picture in access unit');
   }
 
   // 是否已有一次自动重连在进行中（防止重连风暴/重复重连）
