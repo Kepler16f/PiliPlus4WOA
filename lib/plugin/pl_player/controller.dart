@@ -668,6 +668,7 @@ class PlPlayerController with BlockConfigMixin {
         triggerFullScreen(status: true);
       }
 
+      _ensureStallWatchdog();
       await _initializePlayer();
       onInit?.call();
     } catch (err, stackTrace) {
@@ -820,19 +821,19 @@ class PlPlayerController with BlockConfigMixin {
         ...liveBuffer
       else
         ...buffer,
-      // ARM64 修改版：让 ffmpeg 在网络错误（CDN 掐断 TLS / 连接被重置 /
-      // 流提前结束）时自动重连续流，mpv 内部自愈，大多数断流不再
-      // 传导到 Dart 层触发重连。仅对流媒体生效。
+      // ARM64 修改版设计决策（2026-09）：禁用 ffmpeg 层断点续传自愈。
       //
-      // 注意：media_kit 用 loadfile 的 options 参数传递，逗号是选项分隔符，
-      // 值内部的逗号必须用 mpv 的 %len% 字符串语法整体编码，
-      // 否则 reconnect_streamed 等会被拆成顶层选项而报 "option not found"
-      // （上一版构建日志已实证）。此 mpv 构建的 https 走 ffmpeg curlproto
-      // （日志可见 "curl: transfer failed"），curl 协议自带断点续传重试，
-      // 但 lavf 层的重连选项仍是必要兜底。
-      if (dataSource is! FileSource)
-        'stream-lavf-o': '%84%reconnect=1,reconnect_streamed=1,'
-            'reconnect_on_network_error=1,reconnect_delay_max=10',
+      // 原因：CDN 断流后让 ffmpeg 在同一 demuxer 对象内无缝续传，会产生
+      // 数据空洞（画面冻结、声音继续）并可能把坏数据灌进解码器；两次崩溃
+      // dump 已证实（libmpv+0x50A2D4 / +0x507B94：同一函数、同一指令
+      // str w8,[x8,x9,lsl#2]，[x20] 成员为 NULL 的确定性空指针写，两个不同
+      // mpv 构建同址崩溃，且崩溃先于任何 mpv 错误日志）。坏态续命会把
+      // 确定性崩溃喂给解码器，升级 libmpv 无法解决。
+      //
+      // 改为：断流干净失败 → 错误事件传导到 Dart → 自动重连模块重新拉取
+      // 全新播放链接并全新 loadfile（全新 demuxer / 全新 decoder / 干净状态）。
+      // 因此不再设置 stream-lavf-o 的 reconnect* 选项（reconnect_streamed
+      // 等在上一个构建已验证会被拆成顶层选项，且自愈路径正是崩溃根源）。
     };
 
     String video = dataSource.videoSource;
@@ -904,17 +905,17 @@ class PlPlayerController with BlockConfigMixin {
   // mpv 对这些错误的字符串前缀不固定（可能是 tls: / ffmpeg: tls: /
   // Error number -10054 / curl:），统一用 contains 匹配。
   //
-  // 另外匹配「断流后数据损坏」类错误：curl 断点续传自愈后，解复用器缓存里
-  // 可能残留半截数据，继续喂给 h264 解码器会产生 Invalid NAL / partial file，
-  // 并已在 dump 中证实会触发 libmpv 内部指针损坏而崩溃
-  // （STATUS_DATATYPE_MISALIGNMENT @ libmpv!+0x507B94）。
-  // 检测到这些错误时立即从当前进度重新打开源，丢弃脏数据。
+  // 注意：禁用 ffmpeg 断点续传自愈后，这类错误会**干净地**传导到这里并
+  // 触发自动重连（全新 URL + 全新 loadfile / 全新解码器），而非在坏态上
+  // 崩溃。'transfer failed'（ffmpeg curlproto 的 CURLE_RECV_ERROR）是断流
+  // 主报错信息，必须匹配，否则断流后会静默卡死。
   static bool _isNetworkResetError(String message) {
     return message.contains('tls: IO error') ||
         message.contains('Error number -10054') ||
         message.contains('Connection reset') ||
         message.contains('ffurl_read returned') ||
         message.contains('Stream ends prematurely') ||
+        message.contains('transfer failed') ||
         message.contains('Invalid NAL unit size') ||
         message.contains('Error splitting the input into NAL units') ||
         message.contains('partial file') ||
@@ -928,6 +929,14 @@ class PlPlayerController with BlockConfigMixin {
   // 避免 CDN 短时间反复断流时触发重连风暴（每次重连失败都会堆积泄漏）。
   DateTime _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _reconnectCooldown = Duration(seconds: 10);
+  // 静默卡死看门狗：某些断流形态不触发任何 mpv 错误事件（无日志可匹配），
+  // 画面/进度会无声停住。周期检查 position 是否持续推进，停滞超阈值即
+  // 强制重新拉取播放链接重建（受重连冷却节流）。
+  Timer? _stallWatchdog;
+  static const Duration _stallWatchdogPeriod = Duration(seconds: 2);
+  static const int _stallWatchdogThreshold = 6; // 2s x 6 = 12s 无进度
+  int _stallWatchdogCount = 0;
+  int _stallWatchdogLastPosMs = -1;
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -938,6 +947,49 @@ class PlPlayerController with BlockConfigMixin {
     _reconnecting = true;
     _reconnectAttempts = 0;
     _tryReconnect();
+  }
+
+  // 启动/维持静默卡死看门狗。幂等：已有实例则复用。
+  // 仅在 Windows 且非本地文件时启用。播放进度在某阈值时间内没有推进
+  // （画面/进度无声停住、且无 mpv 错误事件可匹配）时，强制重新拉取播放
+  // 链接重建。触发受 _lastReconnectAt 冷却节流，避免与错误驱动的重连叠发。
+  void _ensureStallWatchdog() {
+    if (!Platform.isWindows || dataSource is FileSource) return;
+    _stallWatchdog ??= Timer.periodic(_stallWatchdogPeriod, (_) {
+      if (_playerCount == 0 || dataSource is FileSource) {
+        _cancelStallWatchdog();
+        return;
+      }
+      // 暂停/未播放时不判定（用户主动暂停、片尾完成等）。
+      if (!playerStatus.isPlaying) {
+        _stallWatchdogCount = 0;
+        _stallWatchdogLastPosMs = -1;
+        return;
+      }
+      final pos = positionInMilliseconds;
+      if (pos == _stallWatchdogLastPosMs) {
+        _stallWatchdogCount++;
+        if (_stallWatchdogCount >= _stallWatchdogThreshold) {
+          // 连续 12s 无任何进度且状态仍是"播放中"——判定为静默卡死。
+          _stallWatchdogCount = 0;
+          final now = DateTime.now();
+          if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
+          _lastReconnectAt = now;
+          _reconnecting = true;
+          PlPlayerController.refreshPlayUrl();
+        }
+      } else {
+        _stallWatchdogCount = 0;
+      }
+      _stallWatchdogLastPosMs = pos;
+    });
+  }
+
+  void _cancelStallWatchdog() {
+    _stallWatchdog?.cancel();
+    _stallWatchdog = null;
+    _stallWatchdogCount = 0;
+    _stallWatchdogLastPosMs = -1;
   }
 
   Future<void> _tryReconnect() async {
@@ -1016,6 +1068,8 @@ class PlPlayerController with BlockConfigMixin {
           _reconnecting = false;
           _reconnectAttempts = 0;
           _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
+          _stallWatchdogCount = 0;
+          _stallWatchdogLastPosMs = -1;
           if (_isAutoEnterPip) {
             if (_isCurrVideoPage) {
               enterPip(autoEnter: true);
@@ -1024,11 +1078,11 @@ class PlPlayerController with BlockConfigMixin {
             }
           }
           playerStatus.value = .playing;
+          _ensureStallWatchdog();
         } else {
           _disableAutoEnterPip();
           playerStatus.value = .paused;
         }
-
         videoPlayerServiceHandler?.onStatusChange(
           playerStatus.value,
           isBuffering.value,
@@ -1686,6 +1740,7 @@ class PlPlayerController with BlockConfigMixin {
       AndroidHelper$ToDart.onUserLeaveHint = null;
     }
     _timer?.cancel();
+    _cancelStallWatchdog();
     // _position.close();
     // _playerEventSubs?.cancel();
     // _sliderPosition.close();
