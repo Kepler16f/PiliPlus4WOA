@@ -10,24 +10,12 @@ version:
 project_type: app
 
 # Tracks metadata for the flutter migrate command
+#
+# WOA 修改版：本 fork 只保留 Windows 平台工程（android/ ios/ linux/ macos/
+# 及其迁移元数据已移除）。
 migration:
   platforms:
     - platform: root
-      create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-      base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-    - platform: android
-      create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-      base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-    - platform: ios
-      create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-      base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-    - platform: linux
-      create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-      base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-    - platform: macos
-      create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-      base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
-    - platform: web
       create_revision: 4b12645012342076800eb701bcdfe18f87da21cf
       base_revision: 4b12645012342076800eb701bcdfe18f87da21cf
     - platform: windows
@@ -42,4 +30,3 @@ migration:
   # Files that are not part of the templates will be ignored by default.
   unmanaged_files:
     - 'lib/main.dart'
-    - 'ios/Runner.xcodeproj/project.pbxproj'

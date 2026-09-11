@@ -46,13 +46,12 @@
 
 ## 适配平台
 
-- [x] Android
-- [x] iOS
-- [x] Pad
-- [x] Windows
-- [x] Linux
+本仓库（**PiliPlus4WOA**）是 [PiliPlus](https://github.com/bggRGjQaUbCoE/PiliPlus)
+的 **Windows on ARM（ARM64）** 移植分支，只构建、只发布 Windows ARM64 版本，
+上游的 Android / iOS / Pad / Linux 工程与构建流程已从本分支移除。
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/piliplus.svg)](https://repology.org/project/piliplus/versions)
+- [x] Windows ARM64
+- [ ] 其它平台（请使用[上游仓库](https://github.com/bggRGjQaUbCoE/PiliPlus)）
 
 ## refactor
 

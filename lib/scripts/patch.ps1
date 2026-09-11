@@ -1,4 +1,7 @@
 param(
+    # WOA 修改版：本 fork 只有 Windows 一个平台，所有分支已收敛为 Windows 行为，
+    # 因此该参数不再参与任何判断；保留它是为了不改动调用方
+    # （.github/workflows/win_arm64.yml 仍以 `patch.ps1 windows` 调用）。
     [string]$platform = ""
 )
 
@@ -9,23 +12,9 @@ git config --global user.email "example@example.com"
 # https://github.com/flutter/flutter/issues/182281
 $NewOverScrollIndicator = "362b1de29974ffc1ed6faa826e1df870d7bec75f";
 
-# set `gestureSettings`
-$BottomSheetAndroidPatch = "lib/scripts/bottom_sheet_android.patch"
-
-# https://github.com/bggRGjQaUbCoE/PiliPlus/issues/1906
-$BottomSheetIOSFlutterPatch = "lib/scripts/bottom_sheet_ios_flutter.patch"
-$BottomSheetIOSPiliPlusPatch = "lib/scripts/bottom_sheet_ios_piliplus.patch"
-
-# https://github.com/bggRGjQaUbCoE/PiliPlus/issues/1662
-# handle bottom scroll event
-$ScrollViewPatch = "lib/scripts/scroll_view.patch"
-
 # https://github.com/bggRGjQaUbCoE/PiliPlus/issues/2106
 # use `TouchGestureRecognizer` on all platforms
 $TextSelectionPatch = "lib/scripts/text_selection.patch"
-
-# https://github.com/bggRGjQaUbCoE/PiliPlus/issues/1947
-$NavigatorPatch = "lib/scripts/navigator.patch"
 
 # https://github.com/bggRGjQaUbCoE/PiliPlus/issues/2107
 $ImageAnimPatch = "lib/scripts/image_anim.patch"
@@ -99,23 +88,6 @@ $ModalBarrierPatch = "lib/scripts/modal_barrier.patch"
 # https://github.com/flutter/flutter/issues/182466
 $MouseCursorPatch = "lib/scripts/mouse_cursor.patch"
 
-$GeetestIOSPatch = "lib/scripts/geetest_ios.patch"
-
-if ($platform.ToLower() -eq "ios") {
-    git apply $BottomSheetIOSPiliPlusPatch
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$BottomSheetIOSPiliPlusPatch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-    git apply $GeetestIOSPatch
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$GeetestIOSPatch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-}
-
 Set-Location $env:FLUTTER_ROOT
 
 $picks   = @()
@@ -127,29 +99,6 @@ $patches = @($ModalBarrierPatch, $TextSelectionPatch, $MouseCursorPatch,
             $ScrollPositionPatch, $ScrollablePatch, $ScrollableGesturePatch,
             $DraggableScrollableSheetPatch, $ScaffoldPatch, $TextPatch,
             $TextPainterPatch, $SliverPatch, $RefreshIndicatorPatch)
-
-switch ($platform.ToLower()) {
-    "android" {
-        $patches += $BottomSheetAndroidPatch
-        $patches += $ScrollViewPatch
-        $patches += $NavigatorPatch
-
-        git reset --hard HEAD
-    }
-    "ios" {
-        $patches += $ScrollViewPatch
-        $patches += $BottomSheetIOSFlutterPatch
-        $patches += $NavigatorPatch
-    }
-    "linux" {
-        git reset --hard HEAD
-    }
-    "macos" {
-    }
-    "windows" {
-    }
-    default {}
-}
 
 foreach ($pick in $picks) {
     git stash
@@ -186,10 +135,6 @@ foreach ($patch in $patches) {
 
 Set-Location $env:GITHUB_WORKSPACE
 
-$BottomSheetAndroidPatchMaterial = "lib/scripts/material/bottom_sheet_android.patch"
-
-$BottomSheetIOSFlutterMaterialPatchMaterial = "lib/scripts/material/bottom_sheet_ios_flutter_material.patch"
-
 $ModalBarrierPatchMaterial = "lib/scripts/material/modal_barrier_material.patch"
 
 $NavigationDrawerPatchMaterial = "lib/scripts/material/navigation_drawer.patch"
@@ -210,24 +155,8 @@ $patches_material = @($ModalBarrierPatchMaterial, $NavigationDrawerPatchMaterial
                     $FABPatchMaterial, $TextFieldPatchMaterial, $ScaffoldPatchMaterial, $RefreshIndicatorPatchMaterial,
                     $TabsPatchMaterial)
 
-$PubCacheDir = "~/.pub-cache"
-
-switch ($platform.ToLower()) {
-    "android" {
-        $patches_material += $BottomSheetAndroidPatchMaterial
-    }
-    "ios" {
-        $patches_material += $BottomSheetIOSFlutterMaterialPatchMaterial
-    }
-    "linux" {
-    }
-    "macos" {
-    }
-    "windows" {
-        $PubCacheDir = "$env:LOCALAPPDATA/Pub/Cache"
-    }
-    default {}
-}
+# WOA 修改版：本 fork 只构建 Windows，pub 缓存固定用 LOCALAPPDATA 下的路径。
+$PubCacheDir = "$env:LOCALAPPDATA/Pub/Cache"
 
 try {
     $MaterialUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
@@ -260,51 +189,6 @@ Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/material" -Filter *.patch
 cd $MaterialUiDir.FullName
 
 foreach ($patch in $patches_material) {
-    git apply "$env:GITHUB_WORKSPACE/$patch"
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "$patch applied"
-    } else {
-        throw "$LASTEXITCODE"
-    }
-}
-
-$BottomSheetIOSFlutterPatchCupertino = "lib/scripts/cupertino/bottom_sheet_ios_flutter.patch"
-
-$patches_cupertino = @()
-
-switch ($platform.ToLower()) {
-    "android" {
-    }
-    "ios" {
-        $patches_cupertino += $BottomSheetIOSFlutterPatchCupertino
-    }
-    "linux" {
-    }
-    "macos" {
-    }
-    "windows" {
-    }
-    default {}
-}
-
-$CupertinoUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
-    Where-Object { $_.Name -like "cupertino_ui-*" } |
-    Select-Object -Last 1
-
-if (-not $CupertinoUiDir) {
-    throw "cupertino_ui package not found in pub cache"
-}
-
-Write-Host "cupertino_ui dir: $($CupertinoUiDir.FullName)"
-
-Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/cupertino" -Filter *.patch | ForEach-Object {
-    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" | 
-        Set-Content -NoNewline $_.FullName
-}
-
-cd $CupertinoUiDir.FullName
-
-foreach ($patch in $patches_cupertino) {
     git apply "$env:GITHUB_WORKSPACE/$patch"
     if ($LASTEXITCODE -eq 0) {
         Write-Host "$patch applied"
