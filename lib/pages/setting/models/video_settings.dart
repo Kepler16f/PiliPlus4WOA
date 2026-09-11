@@ -30,6 +30,14 @@ List<SettingsModel> get videoSettings => [
     setKey: SettingBoxKey.enableHA,
     defaultVal: true,
   ),
+  SwitchModel(
+    title: '禁用解码器帧线程',
+    subtitle: '修复 WoA 上播放一段时间后闪退（H.264 帧线程同步 bug）；'
+        '关闭后解码恢复多线程、速度更快，但可能闪退。重新打开视频生效',
+    leading: const Icon(Icons.memory_outlined),
+    setKey: SettingBoxKey.disableFrameThreading,
+    defaultVal: Pref.disableFrameThreading,
+  ),
   const SwitchModel(
     title: '免登录1080P',
     subtitle: '免登录查看1080P视频',

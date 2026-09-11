@@ -759,6 +759,32 @@ class PlPlayerController with BlockConfigMixin {
       opt['force-window'] = 'no';
     }
 
+    // ARM64 修改版：禁用解码器帧线程（frame threading），规避播放中闪退。
+    //
+    // 根因（2026-09，capstone 反汇编 libmpv-2.dll + 4 份崩溃 dump 逐帧回溯）：
+    // 闪退点是 libmpv+0x50A2D4 的 `ldadd w9, w8, [x8]`（ARMv8.1 原子加），
+    // 即 av_buffer_replace 内联的 av_buffer_ref 引用计数自增，而 buf->buffer
+    // 已被释放（NULL）→ use-after-free。调用链：
+    //   mpv 解码线程 → pthread_frame.c update_context_from_thread
+    //   → h264_slice.c ff_h264_update_thread_context
+    //   → h264_picture.c ff_h264_replace_picture
+    //   → av_frame_replace → av_buffer_replace → 崩溃
+    // 即 **H.264 帧线程上下文同步**时复制上一帧线程的 DPB，踩到已释放帧缓冲。
+    // 该路径仅在开启帧线程（thread_count > 1）时存在；实测关闭硬解（软解）
+    // 后仍崩溃，说明与 D3D11VA 硬解无关，此前针对网络层/续传自愈的修复无效
+    // 也是同样原因。
+    //
+    // 因此把解码线程数设为 1（= 关闭帧线程）：
+    //   - vd-lavc-threads=1：软解时的解码器线程数（mpv --vd-lavc-threads）；
+    //   - hwdec-threads=1：硬解时 mpv 会用此值覆盖上面的设置（默认 4，
+    //     见 mpv vd_lavc.c: threads = hwdec_opts->hwdec_threads）。
+    // 代价：CPU 侧解码单线程（硬解时仅解析单线程），1080p 一般无压力；
+    // 若出现卡顿可在「设置 → 视频」中关闭该项。
+    if (Pref.disableFrameThreading) {
+      opt['vd-lavc-threads'] = '1';
+      opt['hwdec-threads'] = '1';
+    }
+
     final player = await Player.create(
       configuration: PlayerConfiguration(
         logLevel: kDebugMode ? .warn : .error,

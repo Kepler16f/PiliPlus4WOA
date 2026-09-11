@@ -17,6 +17,7 @@ abstract final class SettingBoxKey {
       bufferSize = 'bufferSize',
       bufferSec = 'bufferSec',
       hardwareDecoding = 'hardwareDecoding',
+      disableFrameThreading = 'disableFrameThreading',
       videoSync = 'videoSync',
       autosync = 'autosync',
       p1080 = 'p1080',

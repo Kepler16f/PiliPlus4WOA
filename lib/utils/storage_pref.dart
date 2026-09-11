@@ -288,6 +288,19 @@ abstract final class Pref {
         : HwDecType.auto.hwdec,
   );
 
+  /// ARM64 修改版：禁用解码器帧线程（frame threading），规避播放中闪退。
+  ///
+  /// 崩溃根因（2026-09，capstone 反汇编 + dump 逐帧回溯）：闪退发生在
+  /// libmpv 的 H.264 **帧线程上下文同步**路径（ff_h264_update_thread_context
+  /// → ff_h264_replace_picture → av_frame_replace → av_buffer_replace 里对
+  /// 已释放 AVBufferRef 做引用计数自增，崩在 libmpv+0x50A2D4）。该路径只在
+  /// 开启帧线程时存在，且关闭硬解后依然崩溃，故与硬解无关。
+  /// 默认在 Windows 上开启（WOA 为目标平台）；受影响时可随时关闭。
+  static bool get disableFrameThreading => _setting.get(
+    SettingBoxKey.disableFrameThreading,
+    defaultValue: Platform.isWindows,
+  );
+
   static String get videoSync =>
       _setting.get(SettingBoxKey.videoSync, defaultValue: 'display-resample');
 
