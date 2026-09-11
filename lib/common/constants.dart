@@ -2,6 +2,10 @@ abstract final class Constants {
   static const appName = 'PiliPlus';
   static const sourceCodeUrl = 'https://github.com/Kepler16f/PiliPlus4WOA';
 
+  /// 上游（原始）仓库：本 fork（WOA 移植版）基于它修改而来。
+  static const upstreamSourceCodeUrl =
+      'https://github.com/bggRGjQaUbCoE/PiliPlus';
+
   // 27eb53fc9058f8c3  移动端 Android
   // 4409e2ce8ffd12b8  HD版
   static const String appKey = 'dfca71928277209b';
