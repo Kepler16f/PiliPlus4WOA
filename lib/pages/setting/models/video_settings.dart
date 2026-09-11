@@ -32,8 +32,9 @@ List<SettingsModel> get videoSettings => [
   ),
   SwitchModel(
     title: '禁用解码器帧线程',
-    subtitle: '修复 WoA 上播放一段时间后闪退（H.264 帧线程同步 bug）；'
-        '关闭后解码恢复多线程、速度更快，但可能闪退。重新打开视频生效',
+    subtitle: '修复 WoA 上播放一段时间后闪退（H.264 帧线程同步 bug）。'
+        '开启时解码为单线程，并禁止中途降级到软解；关闭后恢复多线程、'
+        '更快，但可能闪退。重新打开视频生效',
     leading: const Icon(Icons.memory_outlined),
     setKey: SettingBoxKey.disableFrameThreading,
     defaultVal: Pref.disableFrameThreading,

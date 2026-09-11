@@ -783,6 +783,22 @@ class PlPlayerController with BlockConfigMixin {
     if (Pref.disableFrameThreading) {
       opt['vd-lavc-threads'] = '1';
       opt['hwdec-threads'] = '1';
+      // 关键配套：别让 mpv 因为几帧坏数据就把硬件解码器降级为软件解码。
+      //
+      // mpv 默认在「连续 3 次解码失败」后判定硬解失效并切到下一个解码方式
+      // （最终是软解），见 mpv vd_lavc.c: handle_err() 累加 hwdec_fail_count，
+      // 达到 hwdec_opts->software_fallback（默认 3）即置 hwdec_failed 触发
+      // force_fallback()。CDN 断流只要产生几帧坏数据（日志里的
+      // Invalid NAL unit size / Error splitting the input into NAL units）
+      // 就足以触发——实测的坏包会连续产生 3~6 个解码错误，正好踩线。
+      //
+      // 而关掉帧线程后（上面的 vd-lavc-threads=1），软件解码只剩单线程，
+      // 1080p 高码率跟不上：表现为「画面卡住、声音正常播放」。所以这里把
+      // 阈值放宽到 30（约等于 30fps 下 1 秒的连续错误）：偶发坏包不再触发
+      // 降级，坏帧直接被丢弃、等到关键帧自然恢复；而硬件解码器真的坏掉时
+      // （持续错误）仍会在约 1 秒后降级兜底。
+      // 硬解在初始化阶段失败不受此选项影响（那条路径会正常回退）。
+      opt['hwdec-software-fallback'] = '30';
     }
 
     final player = await Player.create(
@@ -955,14 +971,24 @@ class PlPlayerController with BlockConfigMixin {
   // 避免 CDN 短时间反复断流时触发重连风暴（每次重连失败都会堆积泄漏）。
   DateTime _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _reconnectCooldown = Duration(seconds: 10);
-  // 静默卡死看门狗：某些断流形态不触发任何 mpv 错误事件（无日志可匹配），
-  // 画面/进度会无声停住。周期检查 position 是否持续推进，停滞超阈值即
-  // 强制重新拉取播放链接重建（受重连冷却节流）。
+  // 画面卡死看门狗：某些故障不触发任何 mpv 错误事件（无日志可匹配），
+  // 表现为「画面冻结、声音继续」。
+  //
+  // 为什么不能用 positionInMilliseconds：它对应 mpv 的 time-pos，由音频时钟
+  // 驱动。画面冻结时音频照常播放，time-pos 一直在推进，所以旧版看门狗
+  // （比较 position 有没有变）永远不触发——这正是该故障一直无法自愈的原因。
+  //
+  // 改用 mpv 的 video-pts：它只在视频帧真正送入 VO 时才更新
+  // （mpv player/video.c: mpctx->video_pts = mpctx->next_frames[0]->pts）。
+  // 画面冻结时它不再变化，而音频仍在推进，据此判定。属性读不到时不做判定。
   Timer? _stallWatchdog;
   static const Duration _stallWatchdogPeriod = Duration(seconds: 2);
-  static const int _stallWatchdogThreshold = 6; // 2s x 6 = 12s 无进度
+  static const int _stallWatchdogThreshold = 4; // 2s x 4 = 8s 画面无新帧
   int _stallWatchdogCount = 0;
-  int _stallWatchdogLastPosMs = -1;
+  double? _stallWatchdogLastVideoPts;
+  // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
+  // 用于区分「真的恢复了」和「音频在放但画面卡住」。
+  bool _videoStalled = false;
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -975,10 +1001,29 @@ class PlPlayerController with BlockConfigMixin {
     _tryReconnect();
   }
 
-  // 启动/维持静默卡死看门狗。幂等：已有实例则复用。
-  // 仅在 Windows 且非本地文件时启用。播放进度在某阈值时间内没有推进
-  // （画面/进度无声停住、且无 mpv 错误事件可匹配）时，强制重新拉取播放
-  // 链接重建。触发受 _lastReconnectAt 冷却节流，避免与错误驱动的重连叠发。
+  // 读取 mpv 属性（判定/诊断用）。读不到返回 null。
+  String? _mpvProp(String name) {
+    final player = _videoPlayerController;
+    if (player is! NativePlayer) return null;
+    try {
+      final v = player.getProperty(name);
+      return v.isEmpty ? null : v;
+    } catch (_) {
+      // 播放器已释放等
+      return null;
+    }
+  }
+
+  // 画面推进到的时间戳（秒）。属性不可用/未解析成功时返回 null。
+  double? _videoPts() {
+    final raw = _mpvProp('video-pts');
+    if (raw == null) return null;
+    final v = double.tryParse(raw);
+    return (v == null || !v.isFinite) ? null : v;
+  }
+
+  // 启动/维持画面卡死看门狗。幂等：已有实例则复用。
+  // 仅在 Windows 且非本地文件时启用（WOA 为目标平台）。
   void _ensureStallWatchdog() {
     if (!Platform.isWindows || dataSource is FileSource) return;
     _stallWatchdog ??= Timer.periodic(_stallWatchdogPeriod, (_) {
@@ -986,36 +1031,75 @@ class PlPlayerController with BlockConfigMixin {
         _cancelStallWatchdog();
         return;
       }
-      // 暂停/未播放时不判定（用户主动暂停、片尾完成等）。
-      if (!playerStatus.isPlaying) {
-        _stallWatchdogCount = 0;
-        _stallWatchdogLastPosMs = -1;
+      // 下列情况下画面本来就不该推进，不能判定为卡死：
+      // 暂停/片尾（!isPlaying）、缓冲中（解复用没数据）、页面已切走
+      // （vo=libmpv 由渲染请求驱动解码，切走后 mpv 会停止继续解码）。
+      if (!playerStatus.isPlaying || isBuffering.value || !_isCurrVideoPage) {
+        _resetStallWatchdogProgress();
         return;
       }
-      final pos = positionInMilliseconds;
-      if (pos == _stallWatchdogLastPosMs) {
-        _stallWatchdogCount++;
-        if (_stallWatchdogCount >= _stallWatchdogThreshold) {
-          // 连续 12s 无任何进度且状态仍是"播放中"——判定为静默卡死。
-          _stallWatchdogCount = 0;
-          final now = DateTime.now();
-          if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
-          _lastReconnectAt = now;
-          _reconnecting = true;
-          PlPlayerController.refreshPlayUrl();
+      final pts = _videoPts();
+      if (pts == null) {
+        // 属性读不到（该 mpv 构建无 video-pts / 播放器已释放）→ 不做判定。
+        _resetStallWatchdogProgress();
+        return;
+      }
+      if (_stallWatchdogLastVideoPts == pts) {
+        if (_stallWatchdogCount < _stallWatchdogThreshold) {
+          _stallWatchdogCount++;
         }
       } else {
         _stallWatchdogCount = 0;
+        _stallWatchdogLastVideoPts = pts;
       }
-      _stallWatchdogLastPosMs = pos;
+      _videoStalled = _stallWatchdogCount >= _stallWatchdogThreshold;
+      if (_videoStalled) {
+        // 连续 8s 画面没有新帧、而音频仍在推进 → 判定画面卡死。
+        // 之后每 2s 都会走到这里，但真正的恢复动作由 _onVideoStalled 内的
+        // 冷却（_lastReconnectAt + _reconnectCooldown）节流。
+        _onVideoStalled(pts);
+      }
     });
+  }
+
+  void _resetStallWatchdogProgress() {
+    _stallWatchdogCount = 0;
+    _stallWatchdogLastVideoPts = null;
+    _videoStalled = false;
   }
 
   void _cancelStallWatchdog() {
     _stallWatchdog?.cancel();
     _stallWatchdog = null;
-    _stallWatchdogCount = 0;
-    _stallWatchdogLastPosMs = -1;
+    _resetStallWatchdogProgress();
+  }
+
+  // 画面卡死：记录一次性诊断信息，再让当前视频页重新拉取播放链接续播
+  // （全新 loadfile / 全新解码器，干净状态）。
+  void _onVideoStalled(double pts) {
+    final now = DateTime.now();
+    if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
+    _lastReconnectAt = now;
+    _reconnecting = true;
+    // 诊断：把 mpv 侧关键状态一次性记下，便于判断卡死原因
+    // （解码器降级到软解 / 在等关键帧 / 渲染停摆 / 解复用没数据）。
+    Utils.reportError(
+      'video stalled (no new frame for '
+      '${_stallWatchdogThreshold * _stallWatchdogPeriod.inSeconds}s): '
+      'video-pts=$pts time-pos=${positionInMilliseconds ~/ 1000}s '
+      'hwdec=${_mpvProp('hwdec-current')}/${_mpvProp('hwdec-active')} '
+      'vo=${_mpvProp('current-vo')} fmt=${_mpvProp('video-format')} '
+      'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
+      'vo-drop=${_mpvProp('frame-drop-count')} '
+      'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
+      'core-idle=${_mpvProp('core-idle')} vf-fps=${_mpvProp('estimated-vf-fps')} '
+      'paused-for-cache=${_mpvProp('paused-for-cache')} '
+      'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
+      'cache-buffering=${_mpvProp('cache-buffering-state')} '
+      'state=${playerStatus.value} buffering=${isBuffering.value}',
+      null,
+    );
+    PlPlayerController.refreshPlayUrl();
   }
 
   Future<void> _tryReconnect() async {
@@ -1024,8 +1108,10 @@ class PlPlayerController with BlockConfigMixin {
       return;
     }
     _reconnectAttempts++;
-    // 播放已恢复（用户手动重试/缓冲自愈成功）则不再继续。
-    if (playerStatus.isPlaying && !isBuffering.value) {
+    // 播放已恢复则不再继续。注意不能只看 playerStatus.isPlaying：画面冻结时
+    // 音频照常播放、状态仍是 playing，旧写法会把这类重连直接丢弃（等于完全
+    // 放弃自愈）。这里要求「画面也在推进」才算恢复。
+    if (playerStatus.isPlaying && !isBuffering.value && !_videoStalled) {
       _reconnecting = false;
       return;
     }
@@ -1095,7 +1181,8 @@ class PlPlayerController with BlockConfigMixin {
           _reconnectAttempts = 0;
           _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
           _stallWatchdogCount = 0;
-          _stallWatchdogLastPosMs = -1;
+          _stallWatchdogLastVideoPts = null;
+          _videoStalled = false;
           if (_isAutoEnterPip) {
             if (_isCurrVideoPage) {
               enterPip(autoEnter: true);
