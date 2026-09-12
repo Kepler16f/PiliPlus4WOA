@@ -295,6 +295,10 @@ abstract final class Pref {
   /// → ff_h264_replace_picture → av_frame_replace → av_buffer_replace 里对
   /// 已释放 AVBufferRef 做引用计数自增，崩在 libmpv+0x50A2D4）。该路径只在
   /// 开启帧线程时存在，且关闭硬解后依然崩溃，故与硬解无关。
+  ///
+  /// 注意：只关帧线程、**不**压缩解码线程数（实现见 PlPlayerController._initPlayer：
+  /// 用 libavcodec 的 `thread_type=slice`）。早先把 vd-lavc-threads 设为 1 会让
+  /// 软解退化成单线程，AV1 等只能软解的片源跟不上，表现为「画面卡住、声音继续」。
   /// 默认在 Windows 上开启（WOA 为目标平台）；受影响时可随时关闭。
   static bool get disableFrameThreading => _setting.get(
     SettingBoxKey.disableFrameThreading,

@@ -759,7 +759,7 @@ class PlPlayerController with BlockConfigMixin {
       opt['force-window'] = 'no';
     }
 
-    // ARM64 修改版：禁用解码器帧线程（frame threading），规避播放中闪退。
+    // ARM64 修改版：关闭解码器**帧线程**（frame threading），规避播放中闪退。
     //
     // 根因（2026-09，capstone 反汇编 libmpv-2.dll + 4 份崩溃 dump 逐帧回溯）：
     // 闪退点是 libmpv+0x50A2D4 的 `ldadd w9, w8, [x8]`（ARMv8.1 原子加），
@@ -770,19 +770,27 @@ class PlPlayerController with BlockConfigMixin {
     //   → h264_picture.c ff_h264_replace_picture
     //   → av_frame_replace → av_buffer_replace → 崩溃
     // 即 **H.264 帧线程上下文同步**时复制上一帧线程的 DPB，踩到已释放帧缓冲。
-    // 该路径仅在开启帧线程（thread_count > 1）时存在；实测关闭硬解（软解）
-    // 后仍崩溃，说明与 D3D11VA 硬解无关，此前针对网络层/续传自愈的修复无效
-    // 也是同样原因。
+    // 实测关闭硬解（软解）后仍崩溃，说明与 D3D11VA 硬解无关。
     //
-    // 因此把解码线程数设为 1（= 关闭帧线程）：
-    //   - vd-lavc-threads=1：软解时的解码器线程数（mpv --vd-lavc-threads）；
-    //   - hwdec-threads=1：硬解时 mpv 会用此值覆盖上面的设置（默认 4，
-    //     见 mpv vd_lavc.c: threads = hwdec_opts->hwdec_threads）。
-    // 代价：CPU 侧解码单线程（硬解时仅解析单线程），1080p 一般无压力；
+    // 关键：要关的是「帧线程」，不是「所有线程」。早先的做法是把解码线程数
+    // 设为 1（vd-lavc-threads=1 + hwdec-threads=1），帧线程确实没了，但连
+    // **切片线程/解码器内部线程**也一并没了 —— 软解退化成单线程，1080p 跟不上，
+    // 表现就是「画面卡住、声音继续」（seek 回去重建解码器后短暂恢复）。
+    // AV1 尤其致命：本平台 AV1 没有硬解（日志里 d3d11 / dxva2_vld / cuda 全部
+    // 初始化失败），只能走 dav1d 软解，而 dav1d 的线程数取自 avctx->thread_count，
+    // 设成 1 等于让 dav1d 单线程解 1080p。
+    //
+    // 正确做法：用 libavcodec 的 AVOption `thread_type=slice`（经 mpv 的
+    // --vd-lavc-o 透传到 AVCodecContext，见 mpv vd_lavc.c 的 mp_set_avopts()，
+    // 在 avcodec_open2 之前生效）。ff_validate_thread_parameters() 只有在
+    // thread_type 含 FF_THREAD_FRAME 时才会走 ff_frame_thread_init()，因此
+    // thread_type=slice 时帧线程被关掉（不含 FF_THREAD_FRAME），上面那条崩溃
+    // 路径不存在；同时 thread_count 保持默认（多线程），切片线程/ dav1d
+    // 内部线程照常工作，不会出现跑不动的单线程软解。
+    // 注意不要设置 vd-lavc-threads / hwdec-threads，否则又会把线程数压到 1。
     // 若出现卡顿可在「设置 → 视频」中关闭该项。
     if (Pref.disableFrameThreading) {
-      opt['vd-lavc-threads'] = '1';
-      opt['hwdec-threads'] = '1';
+      opt['vd-lavc-o'] = 'thread_type=slice';
       // 关键配套：别让 mpv 因为几帧坏数据就把硬件解码器降级为软件解码。
       //
       // mpv 默认在「连续 3 次解码失败」后判定硬解失效并切到下一个解码方式
@@ -791,13 +799,9 @@ class PlPlayerController with BlockConfigMixin {
       // force_fallback()。CDN 断流只要产生几帧坏数据（日志里的
       // Invalid NAL unit size / Error splitting the input into NAL units）
       // 就足以触发——实测的坏包会连续产生 3~6 个解码错误，正好踩线。
-      //
-      // 而关掉帧线程后（上面的 vd-lavc-threads=1），软件解码只剩单线程，
-      // 1080p 高码率跟不上：表现为「画面卡住、声音正常播放」。所以这里把
-      // 阈值放宽到 30（约等于 30fps 下 1 秒的连续错误）：偶发坏包不再触发
-      // 降级，坏帧直接被丢弃、等到关键帧自然恢复；而硬件解码器真的坏掉时
-      // （持续错误）仍会在约 1 秒后降级兜底。
-      // 硬解在初始化阶段失败不受此选项影响（那条路径会正常回退）。
+      // 放宽到 30（约 30fps 下 1 秒的连续错误）：偶发坏包不再触发降级，坏帧
+      // 被丢弃、等到关键帧自然恢复；硬件解码器真的坏掉时（持续错误）仍会在
+      // 约 1 秒后降级兜底。硬解在初始化阶段失败不受影响（那条路径正常回退）。
       opt['hwdec-software-fallback'] = '30';
     }
 
@@ -974,18 +978,33 @@ class PlPlayerController with BlockConfigMixin {
   // 画面卡死看门狗：某些故障不触发任何 mpv 错误事件（无日志可匹配），
   // 表现为「画面冻结、声音继续」。
   //
-  // 为什么不能用 positionInMilliseconds：它对应 mpv 的 time-pos，由音频时钟
-  // 驱动。画面冻结时音频照常播放，time-pos 一直在推进，所以旧版看门狗
-  // （比较 position 有没有变）永远不触发——这正是该故障一直无法自愈的原因。
+  // 为什么不能用 positionInMilliseconds（first attempt）：它对应 mpv 的
+  // time-pos，而 time-pos 在有音频时由**音频时钟**驱动
+  // （mpv player/command.c: get_current_time() 在 audio_status == STATUS_PLAYING
+  // 时返回 playing_audio_pts()）。画面冻结时音频照常播放、time-pos 一直推进，
+  // 比较 position 有没有变永远判不出来。
   //
-  // 改用 mpv 的 video-pts：它只在视频帧真正送入 VO 时才更新
-  // （mpv player/video.c: mpctx->video_pts = mpctx->next_frames[0]->pts）。
-  // 画面冻结时它不再变化，而音频仍在推进，据此判定。属性读不到时不做判定。
+  // 为什么也不能用 video-pts（second attempt）：本 mpv 构建（v0.41.0）的
+  // 属性表里**没有** video-pts（只有 audio-pts；video-frame-info 也不含 pts，
+  // 只有 picture-type / 各种 timecode）。上一版读的 video-pts 恒为空字符串，
+  // 于是看门狗每次都走「属性读不到 → 不判定」分支，**实际从未运行过** ——
+  // 崩溃日志里 0 条 'video stalled' 记录正好印证了这一点。
+  //
+  // 现在的判据：mpv 的 `frame-drop-count`（VO 因帧迟到而丢弃的帧数，累计值，
+  // 来自 vo_get_drop_count()）。它是「视频跟不上音频」的直接后果：
+  //   - display-resample（本应用默认 video-sync）下，正常播放几乎不丢帧；
+  //   - 一旦解码跟不上，帧持续迟到，mpv 会连续丢帧，该计数快速攀升。
+  // 每 2s 采样一次，单个窗口增量 ≥ _stallDropDelta 记一次超标，连续
+  // _stallWindowThreshold 个窗口超标才判定卡死（约 4s，避免偶发抖动误判）。
+  // 跳转（isSeeking）或计数回退（mpv 重建 VO）时直接重置，不参与判定。
   Timer? _stallWatchdog;
   static const Duration _stallWatchdogPeriod = Duration(seconds: 2);
-  static const int _stallWatchdogThreshold = 4; // 2s x 4 = 8s 画面无新帧
+  // 一个采样窗口（2s）内 VO 丢帧增量达到该值，即认为视频已经跟不上音频。
+  static const int _stallDropDelta = 10;
+  // 连续这么多个窗口都超标才判定卡死（约 4s），避免偶发抖动误判。
+  static const int _stallWindowThreshold = 2;
   int _stallWatchdogCount = 0;
-  double? _stallWatchdogLastVideoPts;
+  int? _stallWatchdogLastDrops;
   // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
   // 用于区分「真的恢复了」和「音频在放但画面卡住」。
   bool _videoStalled = false;
@@ -1014,12 +1033,10 @@ class PlPlayerController with BlockConfigMixin {
     }
   }
 
-  // 画面推进到的时间戳（秒）。属性不可用/未解析成功时返回 null。
-  double? _videoPts() {
-    final raw = _mpvProp('video-pts');
-    if (raw == null) return null;
-    final v = double.tryParse(raw);
-    return (v == null || !v.isFinite) ? null : v;
+  // 读取 mpv 的整数属性（判定/诊断用）。读不到或非整数返回 null。
+  int? _intProp(String name) {
+    final raw = _mpvProp(name);
+    return raw == null ? null : int.tryParse(raw);
   }
 
   // 启动/维持画面卡死看门狗。幂等：已有实例则复用。
@@ -1031,40 +1048,48 @@ class PlPlayerController with BlockConfigMixin {
         _cancelStallWatchdog();
         return;
       }
-      // 下列情况下画面本来就不该推进，不能判定为卡死：
-      // 暂停/片尾（!isPlaying）、缓冲中（解复用没数据）、页面已切走
-      // （vo=libmpv 由渲染请求驱动解码，切走后 mpv 会停止继续解码）。
-      if (!playerStatus.isPlaying || isBuffering.value || !_isCurrVideoPage) {
+      // 下列情况下本来就不该有新帧，不能判定为卡死：
+      // 暂停/片尾（!isPlaying）、缓冲中（解复用没数据）、正在跳转、
+      // 页面已切走（vo=libmpv 由渲染请求驱动解码，切走后 mpv 会停止解码）。
+      if (!playerStatus.isPlaying ||
+          isBuffering.value ||
+          isSeeking.value ||
+          !_isCurrVideoPage) {
         _resetStallWatchdogProgress();
         return;
       }
-      final pts = _videoPts();
-      if (pts == null) {
-        // 属性读不到（该 mpv 构建无 video-pts / 播放器已释放）→ 不做判定。
+      final drops = _intProp('frame-drop-count');
+      if (drops == null) {
+        // 属性读不到（播放器已释放等）→ 不做判定。
         _resetStallWatchdogProgress();
         return;
       }
-      if (_stallWatchdogLastVideoPts == pts) {
-        if (_stallWatchdogCount < _stallWatchdogThreshold) {
-          _stallWatchdogCount++;
-        }
+      final last = _stallWatchdogLastDrops;
+      _stallWatchdogLastDrops = drops;
+      // 首次采样，或计数回退（mpv 重建了 VO）→ 重新起算。
+      if (last == null || drops < last) {
+        _stallWatchdogCount = 0;
+        _videoStalled = false;
+        return;
+      }
+      if (drops - last >= _stallDropDelta) {
+        _stallWatchdogCount++;
       } else {
         _stallWatchdogCount = 0;
-        _stallWatchdogLastVideoPts = pts;
+        _videoStalled = false;
       }
-      _videoStalled = _stallWatchdogCount >= _stallWatchdogThreshold;
-      if (_videoStalled) {
-        // 连续 8s 画面没有新帧、而音频仍在推进 → 判定画面卡死。
-        // 之后每 2s 都会走到这里，但真正的恢复动作由 _onVideoStalled 内的
-        // 冷却（_lastReconnectAt + _reconnectCooldown）节流。
-        _onVideoStalled(pts);
+      if (_stallWatchdogCount >= _stallWindowThreshold) {
+        // 视频持续丢帧、跟不上音频 → 判定画面卡死。之后每个窗口都会走到这里，
+        // 真正的恢复动作由 _onVideoStalled 内的冷却（_lastReconnectAt）节流。
+        _videoStalled = true;
+        _onVideoStalled(drops);
       }
     });
   }
 
   void _resetStallWatchdogProgress() {
     _stallWatchdogCount = 0;
-    _stallWatchdogLastVideoPts = null;
+    _stallWatchdogLastDrops = null;
     _videoStalled = false;
   }
 
@@ -1076,23 +1101,26 @@ class PlPlayerController with BlockConfigMixin {
 
   // 画面卡死：记录一次性诊断信息，再让当前视频页重新拉取播放链接续播
   // （全新 loadfile / 全新解码器，干净状态）。
-  void _onVideoStalled(double pts) {
+  void _onVideoStalled(int drops) {
     final now = DateTime.now();
     if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
     _lastReconnectAt = now;
     _reconnecting = true;
-    // 诊断：把 mpv 侧关键状态一次性记下，便于判断卡死原因
-    // （解码器降级到软解 / 在等关键帧 / 渲染停摆 / 解复用没数据）。
+    // 诊断：把 mpv 侧关键状态一次性记下，便于定位卡死原因
+    // （解码器跟不上 / 降级到软解 / 在等关键帧 / 渲染停摆 / 解复用没数据）。
+    // 重点看 hwdec-current 是否掉成 no（硬解被降级到软解）。
     Utils.reportError(
-      'video stalled (no new frame for '
-      '${_stallWatchdogThreshold * _stallWatchdogPeriod.inSeconds}s): '
-      'video-pts=$pts time-pos=${positionInMilliseconds ~/ 1000}s '
-      'hwdec=${_mpvProp('hwdec-current')}/${_mpvProp('hwdec-active')} '
-      'vo=${_mpvProp('current-vo')} fmt=${_mpvProp('video-format')} '
+      'video stalled (VO dropping frames: +$drops): '
+      'time-pos=${positionInMilliseconds ~/ 1000}s '
+      'hwdec=${_mpvProp('hwdec-current')} vo=${_mpvProp('current-vo')} '
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
       'vo-drop=${_mpvProp('frame-drop-count')} '
       'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
-      'core-idle=${_mpvProp('core-idle')} vf-fps=${_mpvProp('estimated-vf-fps')} '
+      'mistimed=${_mpvProp('mistimed-frame-count')} '
+      'vsync-ratio=${_mpvProp('vsync-ratio')} '
+      'vf-fps=${_mpvProp('estimated-vf-fps')} '
+      'container-fps=${_mpvProp('container-fps')} '
+      'core-idle=${_mpvProp('core-idle')} '
       'paused-for-cache=${_mpvProp('paused-for-cache')} '
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
       'cache-buffering=${_mpvProp('cache-buffering-state')} '
@@ -1180,9 +1208,7 @@ class PlPlayerController with BlockConfigMixin {
           _reconnecting = false;
           _reconnectAttempts = 0;
           _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
-          _stallWatchdogCount = 0;
-          _stallWatchdogLastVideoPts = null;
-          _videoStalled = false;
+          _resetStallWatchdogProgress();
           if (_isAutoEnterPip) {
             if (_isCurrVideoPage) {
               enterPip(autoEnter: true);
