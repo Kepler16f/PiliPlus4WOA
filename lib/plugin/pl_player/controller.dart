@@ -1024,6 +1024,9 @@ class PlPlayerController with BlockConfigMixin {
   static const int _stallWindowThreshold = 2;
   int _stallWatchdogCount = 0;
   int? _stallWatchdogLastDrops;
+  // 上一窗口的 time-pos（毫秒）。用于检测「本应播放但位置纹丝不动」
+  // （例如打开后一直 paused / paused-for-cache、或播放器根本没起播）。
+  int _stallWatchdogLastPosMs = -1;
   // 本次卡死开始时的累计丢帧数（只用于日志里给出「本段丢了多少帧」）。
   int? _stallEpisodeDrops;
   // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
@@ -1031,6 +1034,9 @@ class PlPlayerController with BlockConfigMixin {
   bool _videoStalled = false;
   // 同一次卡死里已按「代价从低到高」尝试过几级恢复；画面恢复正常后清零。
   int _stallRecoveryAttempts = 0;
+  // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
+  // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
+  bool _userPaused = false;
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -1071,13 +1077,16 @@ class PlPlayerController with BlockConfigMixin {
         _cancelStallWatchdog();
         return;
       }
-      // 下列情况下本来就不该有新帧，不能判定为卡死：
-      // 暂停/片尾（!isPlaying）、缓冲中（解复用没数据）、正在跳转、
-      // 页面已切走（vo=libmpv 由渲染请求驱动解码，切走后 mpv 会停止解码）。
-      if (!playerStatus.isPlaying ||
-          isBuffering.value ||
-          isSeeking.value ||
-          !_isCurrVideoPage) {
+      // 正在跳转、页面已切走（vo=libmpv 由渲染请求驱动解码，切走后 mpv 会
+      // 停止解码）、应用不在前台时本来就不该有进展，不参与判定。
+      // 前台判定很重要：窗口最小化/切到后台时播放本来就是被有意暂停的
+      // （continuePlayInBackground 关闭时），此时不能去自动恢复。
+      // 注意 **不能**在这里直接按 !isPlaying / isBuffering 退出：形态 C
+      // （本该播放却起不来）恰恰就长这个样子。
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (isSeeking.value ||
+          !_isCurrVideoPage ||
+          (lifecycle != null && lifecycle != AppLifecycleState.resumed)) {
         _resetStallWatchdogProgress();
         return;
       }
@@ -1094,22 +1103,46 @@ class PlPlayerController with BlockConfigMixin {
         _resetStallWatchdogProgress();
         return;
       }
-      if (drops - last >= _stallDropDelta) {
+      final playing = playerStatus.isPlaying;
+      final buffering = isBuffering.value;
+      final pos = positionInMilliseconds;
+      final posFrozen =
+          _stallWatchdogLastPosMs >= 0 && pos == _stallWatchdogLastPosMs;
+      _stallWatchdogLastPosMs = pos;
+      // 三种互相独立的卡死形态：
+      //   A. 在播 + VO 丢帧快速攀升（旧症状：声音在放、画面卡住，渲染端没交帧）
+      //   B. 在播 + time-pos 纹丝不动
+      //   C. 本该播放却没在播（新症状：打开视频根本起不来；用户主动暂停、或
+      //      未开启自动播放时不算，避免跟用户抢控制权）
+      // A/B 在缓冲中不判定（解复用暂时没数据是正常的）；C 不受 buffering 影响，
+      // 因为「一直缓冲着起不来」正是要治的形态。
+      final dropping = playing && !buffering && drops - last >= _stallDropDelta;
+      final frozenPlaying = playing && !buffering && posFrozen;
+      final notPlayingStuck = !playing && !_userPaused && _autoPlay;
+
+      if (dropping || frozenPlaying || notPlayingStuck) {
         _stallWatchdogCount++;
       } else {
-        // 这一窗口没怎么丢帧 → 画面已恢复正常，恢复手段从最轻的一级重新开始。
+        // 这一窗口既没丢帧、位置也在推进 → 已恢复正常，恢复手段从最轻一级重新开始。
         _stallWatchdogCount = 0;
         _videoStalled = false;
         _stallRecoveryAttempts = 0;
       }
       if (_stallWatchdogCount >= _stallWindowThreshold) {
-        // 视频持续丢帧、跟不上音频 → 判定画面卡死。之后每个窗口都会走到这里，
+        // 判定画面卡死（或根本没起播）。之后每个窗口都会走到这里，
         // 真正的恢复动作由 _onVideoStalled 内的冷却（_lastReconnectAt）节流。
         if (!_videoStalled) {
           _videoStalled = true;
           _stallEpisodeDrops = drops;
         }
-        _onVideoStalled(drops);
+        _onVideoStalled(
+          drops,
+          kind: notPlayingStuck
+              ? _StallKind.notPlaying
+              : dropping
+              ? _StallKind.dropping
+              : _StallKind.frozen,
+        );
       }
     });
   }
@@ -1117,6 +1150,7 @@ class PlPlayerController with BlockConfigMixin {
   void _resetStallWatchdogProgress() {
     _stallWatchdogCount = 0;
     _stallWatchdogLastDrops = null;
+    _stallWatchdogLastPosMs = -1;
     _stallEpisodeDrops = null;
     _videoStalled = false;
     _stallRecoveryAttempts = 0;
@@ -1128,14 +1162,20 @@ class PlPlayerController with BlockConfigMixin {
     _resetStallWatchdogProgress();
   }
 
-  // 画面卡死：按「代价从低到高」逐级恢复，每次动作都记一条诊断。
-  //   1 级：往回跳 1s —— 把视频 pts 重新对齐到音频，终止丢帧雪崩。
-  //         这正是用户手动「往回拖进度条」所做的事，不需要网络、代价最低。
+  // 画面卡死 / 根本没起播：按「代价从低到高」逐级恢复，每次动作都记一条诊断。
+  //   dropping（丢帧型，旧症状：声音在放、画面卡住）
+  //     1 级：往回跳 1s —— 把视频 pts 重新对齐到音频，终止丢帧雪崩。
+  //           这正是用户手动「往回拖进度条」所做的事，不需要网络、代价最低。
+  //   frozen（停滞型，在播但位置不动）
+  //     1 级：再显式 play() 一次，很多情况下只是播放在某处被暂停了。
+  //   notPlaying（本该播放却没在播，新症状：打开视频根本起不来）
+  //     1 级：同上，先把播放状态拉起来（位置本来就没动，跳转没有意义）。
+  // 之后各级相同：
   //   2 级：重开当前 URL 从当前位置续播（refreshPlayer，不重新拉链接）。
   //   3 级起：让视频页重新拉取播放链接（refreshPlayUrl，最重、依赖网络）。
   // 每一级由 _lastReconnectAt + _reconnectCooldown 节流；画面恢复正常
-  // （某窗口不再丢帧）后 _stallRecoveryAttempts 归零，下次从 1 级重新开始。
-  void _onVideoStalled(int drops) {
+  // （某窗口既没丢帧、位置也在推进、或在正常播放）后 _stallRecoveryAttempts 归零。
+  void _onVideoStalled(int drops, {required _StallKind kind}) {
     final now = DateTime.now();
     if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
     _lastReconnectAt = now;
@@ -1147,7 +1187,7 @@ class PlPlayerController with BlockConfigMixin {
     // （decoder-drop=0、vo-delayed=0、hwdec 正常 → 是渲染端没交帧）。
     Utils.reportError(
       'video stalled (recovery#$_stallRecoveryAttempts, '
-      'VO dropped ${drops - start} frames): '
+      '${kind.name}, VO dropped ${drops - start} frames): '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'hwdec=${_mpvProp('hwdec-current')} vo=${_mpvProp('current-vo')} '
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
@@ -1162,18 +1202,29 @@ class PlPlayerController with BlockConfigMixin {
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
       'cache-buffering=${_mpvProp('cache-buffering-state')} '
       'texture-id=${_videoController?.id.value} '
-      'state=${playerStatus.value} buffering=${isBuffering.value}',
+      'state=${playerStatus.value} buffering=${isBuffering.value} '
+      'duration=${duration.value}s userPaused=$_userPaused autoPlay=$_autoPlay '
+      'callBackNull=${_playCallBack == null} '
+      // mpv 侧直接读的暂停/空闲/片尾状态：区分「mpv 被暂停」和「解码/渲染停摆」
+      'mpv-pause=${_mpvProp('pause')} idle=${_mpvProp('idle-active')} '
+      'eof=${_mpvProp('eof-reached')} seeking=${_mpvProp('seeking')}',
       null,
     );
 
     if (_stallRecoveryAttempts <= 1) {
-      // 1 级：往回跳 1s（不足 1s 就跳到 0）。isSeek: false 避免等待缓冲。
-      final ms = positionInMilliseconds - 1000;
-      seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
+      if (kind == _StallKind.dropping) {
+        // 丢帧型 1 级：往回跳 1s（不足 1s 就跳到 0）。isSeek: false 避免等待缓冲。
+        final ms = positionInMilliseconds - 1000;
+        seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
+      } else {
+        // 停滞型 / 起不来型 1 级：位置本来就没动，跳转没有意义 →
+        // 先把播放跑起来（走 _startPlayback，回调缺失时也能兜底）。
+        _startPlayback();
+      }
       return;
     }
     if (_stallRecoveryAttempts == 2) {
-      // 2 级：跳转没救回来 → 用当前 URL 从当前位置重开。
+      // 2 级：上一步没救回来 → 用当前 URL 从当前位置重开。
       refreshPlayer();
       return;
     }
@@ -1213,7 +1264,6 @@ class PlPlayerController with BlockConfigMixin {
     _reconnecting = false;
   }
 
-
   // 开始播放
   Future<void> _initializePlayer() async {
     if (_instance == null) return;
@@ -1237,8 +1287,27 @@ class PlPlayerController with BlockConfigMixin {
 
     // 自动播放
     if (_autoPlay) {
-      playIfExists();
+      _startPlayback();
       // await play(duration: duration);
+    }
+  }
+
+  // ARM64 修改版：真正把播放跑起来。
+  //
+  // 为什么不能只调 playIfExists()：`_playCallBack` 是一个**全局静态**回调，
+  // 由视频页/直播间各自注册，并且会在页面退出时被 `setPlayCallBack(null)` 清掉
+  // （见 onPopInvokedWithResult / dispose / 直播间 dispose）。一旦清理动作
+  // 晚于新页面的 initState 执行（旧 State 的 dispose/回调晚一拍很常见），
+  // 新页面注册的回调就被旧页面清成了 null —— 此后 playIfExists() 变成空操作，
+  // **视频永远不开始播放**；而 seek 不经过这个回调，所以「拖动进度条能跳画面、
+  // 就是不播」正好是这个症状。
+  //
+  // 所以这里优先用回调（它会顺带补注册监听器），回调缺失时直接操作播放器兜底。
+  void _startPlayback() {
+    if (_playCallBack == null) {
+      play();
+    } else {
+      playIfExists();
     }
   }
 
@@ -1492,6 +1561,8 @@ class PlPlayerController with BlockConfigMixin {
   /// 播放视频
   Future<void> play({bool repeat = false, bool hideControls = true}) async {
     if (_playerCount == 0) return;
+    // 这是「想要播放」的意图，看门狗据此不再把当前状态当成卡死。
+    _userPaused = false;
     // 播放时自动隐藏控制条
     controls = !hideControls;
     // repeat为true，将从头播放
@@ -1510,6 +1581,9 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 暂停播放
   Future<void> pause({bool notify = true, bool isInterrupt = false}) async {
+    // 记录「主动暂停」意图：看门狗据此不会把暂停状态当成卡死，
+    // 避免自动恢复把用户按下的暂停又按回去。
+    _userPaused = true;
     await _videoPlayerController?.pause();
     playerStatus.value = PlayerStatus.paused;
 
@@ -1646,12 +1720,18 @@ class PlPlayerController with BlockConfigMixin {
       durationInMilliseconds - positionInMilliseconds <= 50;
 
   // 双击播放、暂停
+  // ARM64 修改版：改走本控制器自己的 play()/pause()，而不是直接对 media_kit
+  // 的 player 调 playOrPause()。原因：暂停/播放的「用户意图」必须被记录下来
+  // （_userPaused / _userPaused 由 play() 清、pause() 置），否则画面卡死看门狗
+  // 无法区分「用户就是想暂停」和「播放器卡住了」，会把用户按下的暂停又给按回去。
   Future<void> onDoubleTapCenter() async {
     if (!isLive && isCompleted) {
       await videoPlayerController!.seek(Duration.zero);
-      videoPlayerController!.play();
+      await play();
+    } else if (playerStatus.isPlaying) {
+      await pause();
     } else {
-      videoPlayerController!.playOrPause();
+      await play();
     }
   }
 
@@ -2102,4 +2182,16 @@ class PlPlayerController with BlockConfigMixin {
     }
     Get.back();
   }
+}
+
+/// 画面卡死 / 起不来的形态（供看门狗判定与诊断日志使用）。
+enum _StallKind {
+  /// 正在播放，但 VO 持续丢帧（声音在放、画面冻结）。
+  dropping,
+
+  /// 正在播放，但播放位置不再推进。
+  frozen,
+
+  /// 本该播放却没有在播（打开视频后一直起不来）。
+  notPlaying,
 }
