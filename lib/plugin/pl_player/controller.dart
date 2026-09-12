@@ -990,10 +990,29 @@ class PlPlayerController with BlockConfigMixin {
   // 于是看门狗每次都走「属性读不到 → 不判定」分支，**实际从未运行过** ——
   // 崩溃日志里 0 条 'video stalled' 记录正好印证了这一点。
   //
-  // 现在的判据：mpv 的 `frame-drop-count`（VO 因帧迟到而丢弃的帧数，累计值，
-  // 来自 vo_get_drop_count()）。它是「视频跟不上音频」的直接后果：
-  //   - display-resample（本应用默认 video-sync）下，正常播放几乎不丢帧；
-  //   - 一旦解码跟不上，帧持续迟到，mpv 会连续丢帧，该计数快速攀升。
+  // 现在的判据：mpv 的 `frame-drop-count`（= vo_get_drop_count()）。已用实机日志
+  // 验证（2026-09-12 17:06:43，构建 7c42591b6）：
+  //   video stalled ... hwdec=d3d11va-copy vo=libmpv decoder-drop=0
+  //   vo-drop=95 vo-delayed=0 core-idle=no paused-for-cache=no state=playing
+  // 含义很明确：**解码器完全正常（decoder-drop=0），是渲染端没把帧画出来**。
+  //
+  // 出处是 mpv 自己的 vo_libmpv.c —— flip_page() 等客户端调用
+  // mpv_render_context_render() 最多等 200ms，超时就丢掉这一帧并
+  // vo_increment_drop_count(vo, 1)：
+  //     int64_t until = mp_time_ns() + MP_TIME_MS_TO_NS(200);
+  //     while (ctx->next_frame) { ... 超时 goto done ... }
+  //   done:
+  //     if (ctx->next_frame) { ...; vo_increment_drop_count(vo, 1); }
+  // 即 media_kit 的 ANGLE 渲染路径（VideoOutput::Render() → ANGLESurfaceManager
+  // ::Draw()，它与 Flutter 光栅线程里执行的 Read() 共用同一把内核 mutex）只要
+  // 有一次超过 200ms 没把帧交给 mpv，mpv 就丢帧；而视频 pts 一旦落到音频后面，
+  // 后续帧会持续「迟到」被丢，形成**不自愈的雪崩**（画面冻结、声音继续），直到
+  // 一次跳转/重载把 pts 重新对齐才恢复。这正好解释了两个现象：
+  //   - 「最小化窗口后更容易出现」：最小化/还原会让 Flutter 光栅线程停摆再恢复，
+  //     渲染端与它抢同一把锁、最容易超过 200ms；
+  //   - 「往回拖进度条就恢复」：跳转把视频 pts 重新对齐到音频，雪崩终止。
+  // 所以恢复手段首选**跳转**（便宜、不依赖网络），而不是重拉播放链接。
+  //
   // 每 2s 采样一次，单个窗口增量 ≥ _stallDropDelta 记一次超标，连续
   // _stallWindowThreshold 个窗口超标才判定卡死（约 4s，避免偶发抖动误判）。
   // 跳转（isSeeking）或计数回退（mpv 重建 VO）时直接重置，不参与判定。
@@ -1005,9 +1024,13 @@ class PlPlayerController with BlockConfigMixin {
   static const int _stallWindowThreshold = 2;
   int _stallWatchdogCount = 0;
   int? _stallWatchdogLastDrops;
+  // 本次卡死开始时的累计丢帧数（只用于日志里给出「本段丢了多少帧」）。
+  int? _stallEpisodeDrops;
   // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
   // 用于区分「真的恢复了」和「音频在放但画面卡住」。
   bool _videoStalled = false;
+  // 同一次卡死里已按「代价从低到高」尝试过几级恢复；画面恢复正常后清零。
+  int _stallRecoveryAttempts = 0;
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -1068,20 +1091,24 @@ class PlPlayerController with BlockConfigMixin {
       _stallWatchdogLastDrops = drops;
       // 首次采样，或计数回退（mpv 重建了 VO）→ 重新起算。
       if (last == null || drops < last) {
-        _stallWatchdogCount = 0;
-        _videoStalled = false;
+        _resetStallWatchdogProgress();
         return;
       }
       if (drops - last >= _stallDropDelta) {
         _stallWatchdogCount++;
       } else {
+        // 这一窗口没怎么丢帧 → 画面已恢复正常，恢复手段从最轻的一级重新开始。
         _stallWatchdogCount = 0;
         _videoStalled = false;
+        _stallRecoveryAttempts = 0;
       }
       if (_stallWatchdogCount >= _stallWindowThreshold) {
         // 视频持续丢帧、跟不上音频 → 判定画面卡死。之后每个窗口都会走到这里，
         // 真正的恢复动作由 _onVideoStalled 内的冷却（_lastReconnectAt）节流。
-        _videoStalled = true;
+        if (!_videoStalled) {
+          _videoStalled = true;
+          _stallEpisodeDrops = drops;
+        }
         _onVideoStalled(drops);
       }
     });
@@ -1090,7 +1117,9 @@ class PlPlayerController with BlockConfigMixin {
   void _resetStallWatchdogProgress() {
     _stallWatchdogCount = 0;
     _stallWatchdogLastDrops = null;
+    _stallEpisodeDrops = null;
     _videoStalled = false;
+    _stallRecoveryAttempts = 0;
   }
 
   void _cancelStallWatchdog() {
@@ -1099,22 +1128,30 @@ class PlPlayerController with BlockConfigMixin {
     _resetStallWatchdogProgress();
   }
 
-  // 画面卡死：记录一次性诊断信息，再让当前视频页重新拉取播放链接续播
-  // （全新 loadfile / 全新解码器，干净状态）。
+  // 画面卡死：按「代价从低到高」逐级恢复，每次动作都记一条诊断。
+  //   1 级：往回跳 1s —— 把视频 pts 重新对齐到音频，终止丢帧雪崩。
+  //         这正是用户手动「往回拖进度条」所做的事，不需要网络、代价最低。
+  //   2 级：重开当前 URL 从当前位置续播（refreshPlayer，不重新拉链接）。
+  //   3 级起：让视频页重新拉取播放链接（refreshPlayUrl，最重、依赖网络）。
+  // 每一级由 _lastReconnectAt + _reconnectCooldown 节流；画面恢复正常
+  // （某窗口不再丢帧）后 _stallRecoveryAttempts 归零，下次从 1 级重新开始。
   void _onVideoStalled(int drops) {
     final now = DateTime.now();
     if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
     _lastReconnectAt = now;
     _reconnecting = true;
-    // 诊断：把 mpv 侧关键状态一次性记下，便于定位卡死原因
-    // （解码器跟不上 / 降级到软解 / 在等关键帧 / 渲染停摆 / 解复用没数据）。
-    // 重点看 hwdec-current 是否掉成 no（硬解被降级到软解）。
+    _stallRecoveryAttempts++;
+
+    final start = _stallEpisodeDrops ?? drops;
+    // 诊断：把 mpv 侧关键状态一次性记下。已知的稳定特征见字段块注释
+    // （decoder-drop=0、vo-delayed=0、hwdec 正常 → 是渲染端没交帧）。
     Utils.reportError(
-      'video stalled (VO dropping frames: +$drops): '
+      'video stalled (recovery#$_stallRecoveryAttempts, '
+      'VO dropped ${drops - start} frames): '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'hwdec=${_mpvProp('hwdec-current')} vo=${_mpvProp('current-vo')} '
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
-      'vo-drop=${_mpvProp('frame-drop-count')} '
+      'vo-drop=$drops '
       'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
       'mistimed=${_mpvProp('mistimed-frame-count')} '
       'vsync-ratio=${_mpvProp('vsync-ratio')} '
@@ -1124,9 +1161,23 @@ class PlPlayerController with BlockConfigMixin {
       'paused-for-cache=${_mpvProp('paused-for-cache')} '
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
       'cache-buffering=${_mpvProp('cache-buffering-state')} '
+      'texture-id=${_videoController?.id.value} '
       'state=${playerStatus.value} buffering=${isBuffering.value}',
       null,
     );
+
+    if (_stallRecoveryAttempts <= 1) {
+      // 1 级：往回跳 1s（不足 1s 就跳到 0）。isSeek: false 避免等待缓冲。
+      final ms = positionInMilliseconds - 1000;
+      seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
+      return;
+    }
+    if (_stallRecoveryAttempts == 2) {
+      // 2 级：跳转没救回来 → 用当前 URL 从当前位置重开。
+      refreshPlayer();
+      return;
+    }
+    // 3 级起：重新拉取播放链接（CDN URL 可能已失效）。
     PlPlayerController.refreshPlayUrl();
   }
 
