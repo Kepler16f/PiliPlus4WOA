@@ -305,8 +305,37 @@ abstract final class Pref {
     defaultValue: Platform.isWindows,
   );
 
-  static String get videoSync =>
-      _setting.get(SettingBoxKey.videoSync, defaultValue: 'display-resample');
+  /// 用户选择的视频同步方式（设置页「视频同步」）。
+  ///
+  /// ARM64 修改版：Windows 上默认改成 `audio`（原来是 `display-resample`）。
+  static String get videoSync => _setting.get(
+    SettingBoxKey.videoSync,
+    defaultValue: Platform.isWindows ? 'audio' : 'display-resample',
+  );
+
+  /// 桌面端**实际**使用的视频同步方式（真正传给 mpv 的那个值）。
+  ///
+  /// 为什么桌面端要把 `display-*` 换成 `audio`（2026-09-13）：
+  ///
+  /// `display-*` 全部依赖「显示器的真实刷新率 / 每次呈现的时刻」，而用渲染 API
+  /// 嵌入时（本应用是 `vo=libmpv` + media_kit_video 的 ANGLE 渲染路径）mpv 拿不到
+  /// 这些信息，必须由客户端在每次真正呈现之后调用
+  /// `mpv_render_context_report_swap()` 把时刻报回去。
+  ///
+  /// 实测：**整个 media-kit（含 media_kit_video 的 windows / macos / linux 原生
+  /// 代码与 FFI 绑定）对 `report_swap` 的调用数是 0**（全仓库 grep 无命中）。
+  /// 所以 mpv 永远收不到呈现时刻，`display-*` 只能靠估算值工作 —— 会**误判
+  /// 「这一帧迟到了」而连续丢帧，且丢帧后不会自愈**，表现正是「画面卡住、
+  /// 声音继续放」。实机 stall 日志里 `vsync-ratio=null` 与之一致。
+  ///
+  /// `audio` 以音频时钟为准、完全不依赖 vsync，这也是 media_kit_video 自己在
+  /// 原生 `VideoOutput` 构造里写死 `video-sync=audio` 的原因（见
+  /// media_kit_video/windows/video_output.cc）。桌面端跟随它，移动端不受影响。
+  static String get effectiveVideoSync {
+    final value = videoSync;
+    if (!PlatformUtils.isDesktop) return value;
+    return value.startsWith('display-') ? 'audio' : value;
+  }
 
   static String get autosync => _setting.get(
     SettingBoxKey.autosync,

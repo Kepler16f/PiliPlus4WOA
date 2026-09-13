@@ -11,6 +11,7 @@ import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
 import 'package:PiliPlus/plugin/pl_player/models/audio_output_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/utils/filtering_text.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
@@ -177,7 +178,15 @@ List<SettingsModel> get videoSettings => [
   NormalModel(
     title: '视频同步',
     leading: const Icon(Icons.view_timeline_outlined),
-    getSubtitle: () => '当前：${Pref.videoSync}（此项即mpv的--video-sync）',
+    // ARM64 修改版：桌面端实际生效值可能被替换（display-* → audio），
+    // 所以把「实际生效」也显示出来，避免设置看起来没反应。
+    getSubtitle: () {
+      if (Pref.effectiveVideoSync == Pref.videoSync) {
+        return '当前：${Pref.videoSync}（此项即mpv的--video-sync）';
+      }
+      return '当前：${Pref.videoSync} → 实际生效 ${Pref.effectiveVideoSync}'
+          '（桌面端不支持 display-*，详见弹窗说明）';
+    },
     onTap: _showVideoSyncDialog,
   ),
   NormalModel(
@@ -427,6 +436,12 @@ Future<void> _showVideoSyncDialog(
   BuildContext context,
   VoidCallback setState,
 ) async {
+  // ARM64 修改版：桌面端把 display-* 标成不可用并给出原因。
+  // display-* 需要客户端在每次呈现后调用 mpv_render_context_report_swap()
+  // 把呈现时刻报给 mpv，而本应用用的 media_kit / media_kit_video 全仓库对
+  // 该函数 0 处调用，mpv 拿不到 vsync 时间戳 → 会误判「帧迟到」而连续丢帧、
+  // 且不自愈（画面卡住、声音继续）。桌面端因此固定用 audio。
+  final wasDesktop = PlatformUtils.isDesktop;
   final res = await showDialog<String>(
     context: context,
     builder: (context) => SelectDialog<String>(
@@ -442,7 +457,17 @@ Future<void> _showVideoSyncDialog(
         'display-adrop',
         'display-desync',
         'desync',
-      ].map((e) => (e, e)).toList(),
+      ]
+          .map(
+            (e) => (
+              e,
+              wasDesktop && e.startsWith('display-')
+                  // 说清楚为什么：这条提示就是「设了却像没设」那件事的答案。
+                  ? '$e（桌面端不可用：渲染库不上报呈现时刻，会丢帧卡住）'
+                  : e,
+            ),
+          )
+          .toList(),
     ),
   );
   if (res != null) {

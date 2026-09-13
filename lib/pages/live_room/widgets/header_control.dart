@@ -207,27 +207,29 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
                     ),
             ),
           ),
-          if (PlatformUtils.isMobile)
-            Obx(() {
-              final continuePlayInBackground =
-                  plPlayerController.continuePlayInBackground.value;
-              return ComBtn(
-                height: btnHeight,
-                tooltip: '${continuePlayInBackground ? '关闭' : ''}后台播放',
-                onTap: plPlayerController.setContinuePlayInBackground,
-                icon: continuePlayInBackground
-                    ? const Icon(
-                        size: 18,
-                        Icons.play_circle,
-                        color: Colors.white,
-                      )
-                    : const Icon(
-                        size: 18,
-                        Icons.play_circle_outline,
-                        color: Colors.white,
-                      ),
-              );
-            }),
+          // ARM64 修改版：桌面端也放出该开关（原来只在移动端显示）。它与视频页
+          // 共用同一个设置项，语义见 main/view.dart 的 _pauseOnEnterBackground：
+          // 关（默认）= 最小化/隐藏到托盘时暂停，开 = 继续在后台播放。
+          Obx(() {
+            final continuePlayInBackground =
+                plPlayerController.continuePlayInBackground.value;
+            return ComBtn(
+              height: btnHeight,
+              tooltip: '${continuePlayInBackground ? '关闭' : ''}后台播放',
+              onTap: plPlayerController.setContinuePlayInBackground,
+              icon: continuePlayInBackground
+                  ? const Icon(
+                      size: 18,
+                      Icons.play_circle,
+                      color: Colors.white,
+                    )
+                  : const Icon(
+                      size: 18,
+                      Icons.play_circle_outline,
+                      color: Colors.white,
+                    ),
+            );
+          }),
           ComBtn(
             height: btnHeight,
             tooltip: '定时关闭',

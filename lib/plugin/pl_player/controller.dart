@@ -739,7 +739,9 @@ class PlPlayerController with BlockConfigMixin {
   Future<Player> _initPlayer() async {
     assert(_videoPlayerController == null);
     final opt = {
-      'video-sync': Pref.videoSync,
+      // 用 effectiveVideoSync 而不是 videoSync：桌面端会把 display-* 换成 audio，
+      // 原因见 storage_pref.dart 里 effectiveVideoSync 的注释。
+      'video-sync': Pref.effectiveVideoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
       'volume':
           (PlatformUtils.isMobile ? Pref.playerVolume : volume.value * 100)
@@ -822,6 +824,25 @@ class PlPlayerController with BlockConfigMixin {
         hwdec: hwdec,
       ),
     );
+
+    // ARM64 修改版：视频同步方式在 VideoController 建好之后再落一次。
+    //
+    // 背景：media_kit_video 的原生 VideoOutput 构造里有
+    //     mpv_set_option_string(handle_, "video-sync", "audio");
+    //     mpv_set_option_string(handle_, "video-timing-offset", "0");
+    // （media_kit_video/windows/video_output.cc），而它跑在 mpv_initialize
+    // **之后** —— media_kit 是在 InitializerNativeEventLoop.create() 里先设
+    // 配置里的选项、再 mpv_initialize（见 media_kit/.../initializer_native_event_loop.dart）。
+    // mpv 的客户端 API 文档明确说选项「通常不能在运行时设置」，而且那两行的返回值
+    // 没人检查，所以它们到底生效与否是不确定的。
+    //
+    // 这里在控制器建好之后用 setProperty 再显式设一次，让结果确定下来（用的是
+    // effectiveVideoSync，桌面端已把不可用的 display-* 换成 audio）。
+    // 注意 Player.setProperty 是同步的 void 方法（内部 mpv_set_property_string，
+    // 不检查返回码），设不上也只是静默无效；播放器已释放时它会抛，故包一层 try。
+    try {
+      player.setProperty('video-sync', Pref.effectiveVideoSync);
+    } catch (_) {}
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
 
@@ -1034,6 +1055,13 @@ class PlPlayerController with BlockConfigMixin {
   bool _videoStalled = false;
   // 同一次卡死里已按「代价从低到高」尝试过几级恢复；画面恢复正常后清零。
   int _stallRecoveryAttempts = 0;
+  // 卡死恢复自己的冷却（**不**共用 _reconnectCooldown）。
+  //
+  // 原来的实现让 _onVideoStalled 和 _scheduleReconnect 共用 _lastReconnectAt：
+  // 一次网络重连会顺带把接下来 10s 的卡死恢复一起压掉（反之亦然），
+  // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
+  DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _stallCooldown = Duration(seconds: 6);
   // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
   // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
   bool _userPaused = false;
@@ -1078,15 +1106,27 @@ class PlPlayerController with BlockConfigMixin {
         return;
       }
       // 正在跳转、页面已切走（vo=libmpv 由渲染请求驱动解码，切走后 mpv 会
-      // 停止解码）、应用不在前台时本来就不该有进展，不参与判定。
-      // 前台判定很重要：窗口最小化/切到后台时播放本来就是被有意暂停的
-      // （continuePlayInBackground 关闭时），此时不能去自动恢复。
-      // 注意 **不能**在这里直接按 !isPlaying / isBuffering 退出：形态 C
-      // （本该播放却起不来）恰恰就长这个样子。
+      // 停止解码）、应用没有任何可见视图时本来就不该有进展，不参与判定。
+      //
+      // ⚠️ 这里**曾经**写成 `lifecycle != AppLifecycleState.resumed` 就退出，
+      // 那是「前台播放也会卡住」的直接原因（2026-09-13 修）：
+      // Flutter 文档对 `inactive` 的定义就是「至少有一个视图可见，但都没有输入
+      // 焦点」，并明确写了 **On non-web desktop platforms, this corresponds to an
+      // application that is not in the foreground, but still has visible windows**
+      // （见 sky_engine/lib/ui/platform_dispatcher.dart 的 AppLifecycleState 文档）。
+      // 也就是说：只要用户没有把焦点留在播放器窗口上（点了别的窗口、点了任务栏、
+      // 打开了托盘右键菜单……），生命周期就是 inactive，看门狗**每个 tick 都直接
+      // 返回并清零进度**，于是画面真的卡住时没有任何自愈动作。而窗口最小化/隐藏时
+      // 播放本来就已经被 _pauseOnEnterBackground 暂停，看门狗自己要的 playing 条件
+      // 就不成立，不需要再用生命周期去挡。
+      //
+      // 所以现在只排除「一个可见视图都没有」（hidden/paused/detached）这一种情况。
       final lifecycle = WidgetsBinding.instance.lifecycleState;
-      if (isSeeking.value ||
-          !_isCurrVideoPage ||
-          (lifecycle != null && lifecycle != AppLifecycleState.resumed)) {
+      final noVisibleView =
+          lifecycle == AppLifecycleState.hidden ||
+          lifecycle == AppLifecycleState.paused ||
+          lifecycle == AppLifecycleState.detached;
+      if (isSeeking.value || !_isCurrVideoPage || noVisibleView) {
         _resetStallWatchdogProgress();
         return;
       }
@@ -1120,6 +1160,19 @@ class PlPlayerController with BlockConfigMixin {
       final frozenPlaying = playing && !buffering && posFrozen;
       final notPlayingStuck = !playing && !_userPaused && _autoPlay;
 
+      // 注：这里**没有**再按 `avsync` 判定卡死，只把它记进诊断日志。
+      //
+      // 曾经想加一条「|avsync| 持续偏大 ⇒ A/V 失步 ⇒ 需要跳转重新对齐」的判据，
+      // 因为它看起来比数丢帧更直接。但它没有通过可信度检查，故未采纳：
+      //   1) mpv 手册记 `avsync` 在不可用时为 **-1**，而 -1 的绝对值恰好落在
+      //      判定区间内 —— 起播初期/状态未就绪时会**误判成卡死**并触发多余的跳转；
+      //   2) 更要命的是语义：`avsync` 是「最后一次音视频同步差值」，由视频帧交给
+      //      VO 的那一刻算出。渲染端真停摆时不会再有帧交出去，这个值很可能**冻在
+      //      最后一次的结果上**，而不是持续漂大 —— 那就又犯了本项目已经踩过的坑
+      //      （见 ② 的注释：用 time-pos / video-pts 判断画面冻结都失败，因为它们
+      //      由音频时钟或消费端驱动，画面停了它们照旧/不更新）；
+      //   3) 误判的代价是可见的：无故往回跳 1s。
+      // 所以先只在日志里带上它，等实机复现时用真实数据判定它到底会不会漂，再决定。
       if (dropping || frozenPlaying || notPlayingStuck) {
         _stallWatchdogCount++;
       } else {
@@ -1130,7 +1183,7 @@ class PlPlayerController with BlockConfigMixin {
       }
       if (_stallWatchdogCount >= _stallWindowThreshold) {
         // 判定画面卡死（或根本没起播）。之后每个窗口都会走到这里，
-        // 真正的恢复动作由 _onVideoStalled 内的冷却（_lastReconnectAt）节流。
+        // 真正的恢复动作由 _onVideoStalled 内的冷却节流。
         if (!_videoStalled) {
           _videoStalled = true;
           _stallEpisodeDrops = drops;
@@ -1173,13 +1226,14 @@ class PlPlayerController with BlockConfigMixin {
   // 之后各级相同：
   //   2 级：重开当前 URL 从当前位置续播（refreshPlayer，不重新拉链接）。
   //   3 级起：让视频页重新拉取播放链接（refreshPlayUrl，最重、依赖网络）。
-  // 每一级由 _lastReconnectAt + _reconnectCooldown 节流；画面恢复正常
-  // （某窗口既没丢帧、位置也在推进、或在正常播放）后 _stallRecoveryAttempts 归零。
+  // 每一级由 _lastStallRecoverAt + _stallCooldown（自己的、与网络重连分开）节流；
+  // 画面恢复正常（某窗口既没丢帧、也没落后音频、位置也在推进、或在正常播放）后
+  // _stallRecoveryAttempts 归零。
   void _onVideoStalled(int drops, {required _StallKind kind}) {
     final now = DateTime.now();
-    if (now.difference(_lastReconnectAt) < _reconnectCooldown) return;
-    _lastReconnectAt = now;
-    _reconnecting = true;
+    // 用自己的冷却，不共用网络重连的 _lastReconnectAt / _reconnectCooldown。
+    if (now.difference(_lastStallRecoverAt) < _stallCooldown) return;
+    _lastStallRecoverAt = now;
     _stallRecoveryAttempts++;
 
     final start = _stallEpisodeDrops ?? drops;
@@ -1190,6 +1244,15 @@ class PlPlayerController with BlockConfigMixin {
       '${kind.name}, VO dropped ${drops - start} frames): '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'hwdec=${_mpvProp('hwdec-current')} vo=${_mpvProp('current-vo')} '
+      // avsync = mpv 的「最后一次音视频同步差值」（秒）。这里只记不判：画面冻结
+      // 而声音继续时它**可能**是一个越来越大的负值，也可能是冻住不动的旧值
+      // （渲染端停摆后不再有帧交给 VO，值就不再更新），而且 mpv 手册记它在不可用
+      // 时为 -1 —— 用它做判据会误判，所以先收集实机数据再定。
+      'avsync=${_mpvProp('avsync')} '
+      // 实际生效的 video-sync 与刷新率信息：用来回答「display-* 到底有没有生效」。
+      'video-sync=${_mpvProp('video-sync')} '
+      'display-fps=${_mpvProp('display-fps')} '
+      'estimated-display-fps=${_mpvProp('estimated-display-fps')} '
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
       'vo-drop=$drops '
       'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
@@ -1202,6 +1265,9 @@ class PlPlayerController with BlockConfigMixin {
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
       'cache-buffering=${_mpvProp('cache-buffering-state')} '
       'texture-id=${_videoController?.id.value} '
+      // lifecycle 用来区分「窗口可见但没焦点（inactive）」和「真的不可见
+      // （hidden/paused）」——前台卡死这条线里它是关键判据。
+      'lifecycle=${WidgetsBinding.instance.lifecycleState?.name} '
       'state=${playerStatus.value} buffering=${isBuffering.value} '
       'duration=${duration.value}s userPaused=$_userPaused autoPlay=$_autoPlay '
       'callBackNull=${_playCallBack == null} '
@@ -1211,6 +1277,12 @@ class PlPlayerController with BlockConfigMixin {
       null,
     );
 
+    // ⚠️ 这里**不能**置 `_reconnecting = true`（曾经这么做）。
+    // `_reconnecting` 只由 _scheduleReconnect 检查、由 stream.playing 在收到
+    // playing==true **状态变化**时清除；而画面卡死时音频照常播放、playing 状态
+    // 压根没变过，于是没有任何事件来清除它 —— 一次卡死恢复之后
+    // _scheduleReconnect() 会**永久**变成空操作，后面的断流再也没人重连。
+    // 卡死恢复与断流重连是两条独立通道，各自的并发保护要分开。
     if (_stallRecoveryAttempts <= 1) {
       if (kind == _StallKind.dropping) {
         // 丢帧型 1 级：往回跳 1s（不足 1s 就跳到 0）。isSeek: false 避免等待缓冲。

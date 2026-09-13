@@ -594,18 +594,21 @@ class HeaderControlState extends State<HeaderControl>
                             );
                           },
                         ),
-                      if (PlatformUtils.isMobile)
-                        Obx(
-                          () => ActionRowLineItem(
-                            iconData: Icons.play_circle_outline,
-                            onTap:
-                                plPlayerController.setContinuePlayInBackground,
-                            text: " 后台播放 ",
-                            selectStatus: plPlayerController
-                                .continuePlayInBackground
-                                .value,
-                          ),
+                      // ARM64 修改版：桌面端也放出该开关（原来只在移动端显示）。
+                      // 它与「听视频」同排、样式一致；作用见 main/view.dart 的
+                      // _pauseOnEnterBackground —— 关（默认）表示最小化/隐藏到
+                      // 托盘时暂停播放，开表示继续在后台播放。
+                      Obx(
+                        () => ActionRowLineItem(
+                          iconData: Icons.play_circle_outline,
+                          onTap:
+                              plPlayerController.setContinuePlayInBackground,
+                          text: " 后台播放 ",
+                          selectStatus: plPlayerController
+                              .continuePlayInBackground
+                              .value,
                         ),
+                      ),
                     ],
                   ),
                 ),
