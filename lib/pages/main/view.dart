@@ -22,6 +22,7 @@ import 'package:PiliPlus/utils/mobile_observer.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -206,22 +207,50 @@ class _MainAppState extends PopScopeState<MainApp>
     _onShowWindow();
   }
 
+  // 进入后台（最小化 / 隐藏到托盘）时是否要暂停播放。
+  //
+  // 「后台播放」开关（continuePlayInBackground，默认关，即「进入后台不播」）
+  // 之前只在移动端的生命周期观察者里生效 —— addObserverMobile() 在
+  // PlatformUtils.isMobile 时才注册，Windows 上该观察者从不触发。于是最小化后
+  // mpv 仍在后台解码渲染，而 Flutter 光栅线程随窗口隐藏停摆；还原时渲染线程
+  // 与光栅线程争抢 ANGLE 内核互斥锁、超过 mpv vo_libmpv 的 200ms 丢帧上限，
+  // 视频 pts 落后音频、丢帧雪崩不自愈 —— 正是「最小化一段时间后画面卡死、
+  // 声音正常」的根因。在进入后台时暂停播放即可从源头避免累积丢帧。
+  //
+  // 判定：显式开了「最小化时暂停」（pauseOnMinimize），或没开「后台播放」
+  // （continuePlayInBackground=false，默认），都应当暂停。只有用户明确开了
+  // 后台播放、且没开最小化暂停时，才继续在后台播放。
+  // Pref 是直接读 Hive 的静态 getter（lib/utils/storage_pref.dart），所以这里
+  // 每次调用都拿到最新值，设置页里改开关立刻生效。
+  bool get _pauseOnEnterBackground =>
+      _mainController.pauseOnMinimize || !Pref.continuePlayInBackground;
+
+  // 「本次暂停是为了进后台」标记。
+  //
+  // 不用 MainController.isPlaying 那种一次性布尔量，因为它有两个坑：
+  //   - 恢复播放后从不清零，于是「最小化→还原→用户手动暂停→从托盘菜单
+  //     显示窗口」会把用户刚按下的暂停又按回去；
+  //   - 已暂停时再隐藏一次会被覆盖成 false（窗口最小化时仍是 IsWindowVisible，
+  //     此时点托盘图标走的是隐藏分支），之后再还原就不会续播。
+  // 用本 State 自己的标记：只在真正由本类暂停时才置 true，恢复时立即清零，
+  // 两种情况都不会发生。
+  bool _pausedForBackground = false;
+
   void _onHideWindow() {
-    if (_mainController.pauseOnMinimize) {
-      if (PlPlayerController.instance case final player?) {
-        if (_mainController.isPlaying = player.playerStatus.isPlaying) {
-          player.pause();
-        }
-      } else {
-        _mainController.isPlaying = false;
-      }
+    if (!_pauseOnEnterBackground) return;
+    final player = PlPlayerController.instance;
+    if (player != null && player.playerStatus.isPlaying) {
+      _pausedForBackground = true;
+      // pause() 会置 PlPlayerController._userPaused，画面卡死看门狗据此区分
+      // 「用户/后台有意暂停」和「播放器卡住」，不会把这里的暂停当卡死去恢复。
+      player.pause();
     }
   }
 
   void _onShowWindow() {
-    if (_mainController.pauseOnMinimize && _mainController.isPlaying) {
-      PlPlayerController.instance?.play();
-    }
+    if (!_pausedForBackground) return;
+    _pausedForBackground = false;
+    PlPlayerController.instance?.play();
   }
 
   double? _opacity;
@@ -245,18 +274,28 @@ class _MainAppState extends PopScopeState<MainApp>
     await windowManager.hide();
   }
 
-  Future<void> _show() {
-    return windowManager.show();
+  Future<void> _show() async {
+    // 显示窗口。要注意 window_manager 的 show() 在 Windows 上只做
+    // ShowWindowAsync(SW_SHOW) + SetForegroundWindow（window_manager.cpp 的
+    // WindowManager::Show），**不会**还原最小化的窗口：若此时就把播放拉起来，
+    // 又会回到「窗口没被真正呈现、mpv 却已在渲染」的原状（即本次要修的根因）。
+    // 而 restore() 只判断 showCmd != SW_NORMAL 就发 SC_RESTORE，会误伤**最大化**
+    // 的窗口（把用户拉成普通大小），所以仅在确实处于最小化时才还原。
+    if (await windowManager.isMinimized()) {
+      await windowManager.restore();
+    }
+    await windowManager.show();
   }
 
   @override
   Future<void> onTrayIconMouseDown() async {
     if (await windowManager.isVisible()) {
       _onHideWindow();
-      _hide();
+      await _hide();
     } else {
+      // 先把窗口真正显示/还原出来，再恢复播放。
+      await _show();
       _onShowWindow();
-      _show();
     }
   }
 
@@ -267,10 +306,18 @@ class _MainAppState extends PopScopeState<MainApp>
   }
 
   @override
-  void onTrayMenuItemClick(MenuItem menuItem) {
+  Future<void> onTrayMenuItemClick(MenuItem menuItem) async {
     switch (menuItem.key) {
       case 'show':
-        _show();
+        // 托盘菜单「显示窗口」此前只调用 _show()，漏了 _onShowWindow()：从
+        // 托盘菜单恢复窗口就再也没人把播放拉起来，表现成「窗口回来了但一直不播」。
+        // 此前最小化默认不暂停，所以这条路径没什么损失；本次让最小化/隐藏默认
+        // 暂停后它就成了常见路径。
+        // 顺序上先 _show() 再 _onShowWindow()：窗口真正被呈现之后才恢复播放，
+        // 否则又会短暂进入「窗口没被呈现、mpv 却在渲染」的状态。
+        // （_show() 内部已负责还原最小化的窗口。）
+        await _show();
+        _onShowWindow();
       case 'exit':
         _onClose();
     }

@@ -148,6 +148,14 @@ List<SettingsModel> get playSettings => [
   if (PlatformUtils.isDesktop)
     SwitchModel(
       title: '最小化时暂停/还原时播放',
+      // ARM64 修改版：现在「最小化即暂停」已经是默认行为（只要没开下面这项
+      // 「后台播放」）。新增 Subtitle 说明这一点，免得开关看起来是唯一入口、
+      // 关掉它却仍在暂停 —— 开关与「后台播放」的关系是：
+      //   暂停 = 本开关 || !后台播放
+      // 即本开关是「即使开了后台播放也强制最小化暂停」的强制项。
+      // 注意本文件只有一个列表 playSettings，本项在「后台播放」之前。
+      subtitle: '关掉「后台播放」时这已是默认行为；'
+          '此开关用于在开启「后台播放」后仍强制最小化时暂停',
       leading: const Icon(Icons.pause_circle_outline),
       setKey: SettingBoxKey.pauseOnMinimize,
       defaultVal: false,
@@ -206,14 +214,20 @@ List<SettingsModel> get playSettings => [
     setKey: SettingBoxKey.enableLongShowControl,
     defaultVal: false,
   ),
-  if (PlatformUtils.isMobile)
-    const SwitchModel(
-      title: '后台播放',
-      subtitle: '进入后台时继续播放',
-      leading: Icon(Icons.motion_photos_pause_outlined),
-      setKey: SettingBoxKey.continuePlayInBackground,
-      defaultVal: false,
-    ),
+  // ARM64 修改版：桌面端也放出该开关。
+  // 此前它被 `if (PlatformUtils.isMobile)` 挡住，Windows 上既没有 UI 写入、
+  // Pref.continuePlayInBackground 就恒为 false —— 而 main/view.dart 的
+  // _pauseOnEnterBackground 正是用它决定「最小化/隐藏到托盘时是否继续播放」，
+  // 于是桌面端只剩「一律暂停」且无法改回。默认仍是 false（= 进入后台暂停，
+  // 规避最小化后画面卡死）。
+  const SwitchModel(
+    title: '后台播放',
+    subtitle: '进入后台（最小化/隐藏到托盘）时继续播放，'
+        '但画面长时间不显示后可能丢帧卡住',
+    leading: Icon(Icons.motion_photos_pause_outlined),
+    setKey: SettingBoxKey.continuePlayInBackground,
+    defaultVal: false,
+  ),
   if (Platform.isAndroid) ...[
     SwitchModel(
       title: '后台画中画',
