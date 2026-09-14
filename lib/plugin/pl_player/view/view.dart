@@ -2038,8 +2038,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   Future<void> _samplePicture() async {
     if (!mounted) return;
     // 只在「画面本来就应该在动」的时候判定。
+    // 缓冲时必须跳过：实机日志里有一次触发就是 buffering=true / vf-fps=null
+    // （缓存空了、mpv 根本没在出帧），那种情况画面当然不动，但真正该做的是
+    // 等缓冲/走既有的断流重连，而不是去动播放位置。
     if (!plPlayerController.playerStatus.isPlaying ||
-        plPlayerController.isSeeking.value) {
+        plPlayerController.isSeeking.value ||
+        plPlayerController.isBuffering.value) {
       _unchangedFrameSamples = 0;
       return;
     }

@@ -632,6 +632,8 @@ class PlPlayerController with BlockConfigMixin {
       // 换了片源 → 允许重新打一次管线快照（ready / t+6s）。
       _loggedPipelineReady = false;
       _pipelineReadyTicks = -1;
+      _pictureFrozenDrops = null;
+      _pictureFrozenCount = 0;
       _resetStallWatchdogProgress();
       _aid = aid;
       _bvid = bvid;
@@ -1112,9 +1114,14 @@ class PlPlayerController with BlockConfigMixin {
   // 已经下发过的视频输出表面尺寸，避免重复下发。
   int? _appliedSurfaceWidth;
   int? _appliedSurfaceHeight;
-  // 「画面冻结」判定的节流（静态画面可能误判，别把日志刷满）。
-  DateTime _lastPictureFrozenAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _pictureFrozenCooldown = Duration(seconds: 30);
+  // 「画面冻结」判定的状态（见 onPictureFrozen）。
+  DateTime _lastPictureResyncAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _pictureResyncCooldown = Duration(seconds: 10);
+  // 短时间内连续冻结算同一次事故；隔久了重新计数。
+  int _pictureFrozenCount = 0;
+  // 上一次冻结时的 vo-drop，用来判断「像素不变」到底是真冻结（在丢帧）
+  // 还是视频里本来就有静止画面（不丢帧 → 绝不能动播放位置）。
+  int? _pictureFrozenDrops;
 
   // Rect 在 AOT 下 toString() 会打成 "Instance of 'Rect'"，所以自己拼数值。
   static String _rectDesc(ui.Rect? r) => r == null
@@ -1168,23 +1175,85 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 由画面像素采样发现「画面不再变化」时调用（见 PlVideoPlayer 的采样器）。
   ///
-  /// 这类卡死在 mpv 侧没有任何信号（无丢帧、vf-fps 正常），只能由像素判定。
-  /// 先用代价最低、且**不动播放位置**的表面刷新去救；日志留一条完整快照。
+  /// 这是**唯一**能发现这类卡死的信号：构建 5350 的实机日志证明，卡死时
+  /// `estimated-vf-fps` 照常 30、`decoder-drop=0`、`core-idle=no`、缓存满
+  /// （demuxer-cache-time=4022s），所有常规判据都看不出问题；
+  /// 只有两个数字暴露了它：**像素不变**，以及 **vo-drop=40**。
   ///
-  /// 误判是可能的（视频里本来就有长时间静止的画面），所以：
-  ///   - 动作选成「重建表面」而不是「跳转」—— 静态画面下重建一次完全无感；
-  ///   - 按 30s 节流，避免静态画面把日志刷满。
+  /// 机制因此是明确的：VO 在**缓慢**丢帧（每 2 秒不足 10 帧，够不到
+  /// `_stallDropDelta` 的阈值），视频 pts 逐步落到音频后面 → 画面停在原地、
+  /// 声音继续。**这是时间轴问题，不是渲染表面问题。**
+  ///
+  /// 恢复动作因此是**把视频重新对齐到音频时钟的当前位置**，而不是重建表面：
+  ///   - 视频落后时：这一步把画面直接拉到音频所在处，冻结立刻解除；因为
+  ///     **音频位置一点没动**，用户几乎察觉不到（不像"往回跳"那样会重复一段）。
+  ///   - 万一是误判（视频里本来就有静止画面）：跳到"当前位置"相当于原地重跳，
+  ///     音频不动，副作用仅仅是解码器重建的一次极短闪动。
+  /// 反复出现说明重对齐救不回来（例如解码器/VO 真的坏了）→ 升级为 refreshPlayer
+  /// 重建整条解码+渲染链。
   void onPictureFrozen() {
+    if (_playerCount == 0) return;
     final now = DateTime.now();
-    if (now.difference(_lastPictureFrozenAt) < _pictureFrozenCooldown) return;
-    _lastPictureFrozenAt = now;
+    final sinceLast = now.difference(_lastPictureResyncAt);
+    if (sinceLast < _pictureResyncCooldown) return;
+    _lastPictureResyncAt = now;
+
+    // 距离上次很久 → 新的一次事故，重新计数。
+    if (sinceLast > _stallEpisodeResetAfter) {
+      _pictureFrozenCount = 0;
+    }
+    _pictureFrozenCount++;
+
+    final drops = _intProp('frame-drop-count') ?? 0;
+    final prevDrops = _pictureFrozenDrops;
+    // 两种冻结在数据上完全不同，恢复手段也不同：
+    //  A. vo-drop **持平**、vf-fps 正常：mpv 认为一切正常、帧也在出，只有屏幕不动
+    //     → 断点在「ANGLE 表面 → 共享纹理 → 合成」，靠**重建表面**能救。
+    //     实机 20:06:38 那次就是这样（vo-drop 停在 40 不动，冻结持续数分钟）。
+    //  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 必须跳转重新对齐。
+    final dropsGrowing = prevDrops != null && drops > prevDrops;
+    _pictureFrozenDrops = drops;
+
+    // 动作按代价递进；前两步都**不动播放位置**，所以视频里本来就有静止画面时
+    // 误判的代价也只是一次重建/一次原地重跳，绝不会把进度弄丢。
+    if (dropsGrowing && _pictureFrozenCount > 2) {
+      // B 类且反复发生 → 重建整条解码/渲染链
+      _pictureFrozenCount = 0;
+      Utils.reportError(
+        'picture frozen #(recovering by refreshPlayer): vo-drop=$prevDrops->$drops '
+        'vf-fps=${_mpvProp('estimated-vf-fps')} '
+        'decoder-drop=${_mpvProp('decoder-frame-drop-count')}',
+        null,
+      );
+      _logPipelineSnapshot('picture-frozen');
+      refreshPlayer();
+      return;
+    }
+
     Utils.reportError(
-      'picture frozen (pixels unchanged while mpv reports healthy) -> '
-      'refreshing video surface',
+      'picture frozen #$_pictureFrozenCount: pixels unchanged '
+      '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
+      'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
+      'core-idle=${_mpvProp('core-idle')} '
+      'time-pos=${positionInMilliseconds ~/ 1000}s '
+      'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
+      '-> ${_pictureFrozenCount <= 2 ? 'refresh video surface' : 'refresh surface + resync video pts to the audio clock'}',
       null,
     );
     _logPipelineSnapshot('picture-frozen');
+
+    // 第 1、2 次（以及所有 A 类）：重建视频输出表面与纹理 —— 不动播放位置。
+    // 表面迟早会重建：它绕开「Resize 没发生 / 纹理内容陈旧」这一类断点。
     _applyVideoOutputSize(force: true);
+
+    if (_pictureFrozenCount > 2) {
+      // 重建表面连续两次都没救回来 → 再叠一次「对齐到音频时钟当前位置」。
+      // 注意是**当前位置**而不是往回跳：音频不动，所以即使误判也只是原地重跳。
+      seekTo(
+        Duration(milliseconds: positionInMilliseconds),
+        isSeek: false,
+      );
+    }
   }
 
   // 记一条管线快照。tag 用于区分触发时机（见上面的说明）。
