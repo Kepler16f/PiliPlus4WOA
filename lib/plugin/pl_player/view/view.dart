@@ -72,7 +72,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart'
-    show RenderProxyBox, SemanticsConfiguration;
+    show RenderProxyBox, RenderRepaintBoundary, SemanticsConfiguration;
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -261,6 +261,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     _transformationController = TransformationController();
 
+    _startPictureFreezeSampler();
+
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 100),
@@ -379,6 +381,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     _scaleGestureRecognizer.dispose();
     _brightnessListener?.cancel();
     _controlsListener?.cancel();
+    _freezeSampler?.cancel();
     _animationController.dispose();
     _transformationController.dispose();
     _removeDmAction();
@@ -2001,6 +2004,71 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       );
     }
     return child;
+  }
+
+  // ── 画面冻结检测（像素采样，ARM64 修改版 2026-09-14）────────────────────
+  //
+  // 为什么需要它：实测那种「视频放到一半画面卡死」在 **mpv 侧完全没有信号** ——
+  // frame-drop-count 不涨、estimated-vf-fps 照常等于 container-fps、decoder-drop=0
+  // （构建 5349 的日志里 suspect / hidden-playing / texture-lost 一条都没有，
+  //  等于 mpv 一直在正常解码、帧也一直被正常消费）。既然生产端正常、而屏幕上的
+  // 画面不动，断裂点就只能在「ANGLE 表面 → Flutter 纹理 → 合成」这一段；
+  // 而对这一段，应用层唯一能观测到的信号就是**画面像素本身**。
+  //
+  // 做法：每 3s 把视频那一层 RepaintBoundary 以极低分辨率抓成一张小图
+  // （pixelRatio 0.02，只有几百字节），与上一次比较；连续 3 次完全相同
+  // （约 9s，且期间确实在播、不在跳转）就判定为「画面冻结」，交给控制器处理。
+  // 抓取分辨率极低，开销可以忽略。
+  Timer? _freezeSampler;
+  Uint8List? _lastFramePixels;
+  int _unchangedFrameSamples = 0;
+  static const Duration _freezeSamplePeriod = Duration(seconds: 3);
+  static const int _freezeSamplesToJudge = 3;
+  static const double _freezeSampleScale = 0.05;
+
+  void _startPictureFreezeSampler() {
+    // 只在桌面端跑：这是 WOA 上 ANGLE 渲染路径特有的问题，移动端另有 PiP /
+    // 后台等形态，没必要多背一份负载。
+    if (!PlatformUtils.isDesktop) return;
+    _freezeSampler = Timer.periodic(_freezeSamplePeriod, (_) {
+      _samplePicture();
+    });
+  }
+
+  Future<void> _samplePicture() async {
+    if (!mounted) return;
+    // 只在「画面本来就应该在动」的时候判定。
+    if (!plPlayerController.playerStatus.isPlaying ||
+        plPlayerController.isSeeking.value) {
+      _unchangedFrameSamples = 0;
+      return;
+    }
+    final renderObject = _videoKey.currentContext?.findRenderObject();
+    if (renderObject is! RenderRepaintBoundary || !renderObject.hasSize) {
+      return;
+    }
+    try {
+      final image = await renderObject.toImage(pixelRatio: _freezeSampleScale);
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      image.dispose();
+      if (data == null) return;
+      final pixels = data.buffer.asUint8List();
+      final last = _lastFramePixels;
+      if (last != null &&
+          last.length == pixels.length &&
+          listEquals(last, pixels)) {
+        _unchangedFrameSamples++;
+        if (_unchangedFrameSamples >= _freezeSamplesToJudge) {
+          _unchangedFrameSamples = 0;
+          plPlayerController.onPictureFrozen();
+        }
+      } else {
+        _unchangedFrameSamples = 0;
+      }
+      _lastFramePixels = pixels;
+    } catch (_) {
+      // toImage 在极端情况下会抛（图层未就绪等），忽略即可。
+    }
   }
 
   /// 片源宽高比（width / height），给 PlSimpleVideo 做兜底用。

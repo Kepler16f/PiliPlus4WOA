@@ -1100,6 +1100,92 @@ class PlPlayerController with BlockConfigMixin {
   int _pipelineReadyTicks = -1;
   DateTime _lastPipelineSuspicionAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _pipelineSuspicionCooldown = Duration(seconds: 20);
+  // 固定时间线：与「指标异常」无关，在播时定期记一条。
+  //
+  // 为什么必须无条件：实测那种「画面卡死」在 mpv 侧**完全没有信号** ——
+  // frame-drop-count 不涨、estimated-vf-fps 照常等于 container-fps、decoder-drop=0。
+  // 任何「按指标异常触发」的日志都抓不到它（上一版就是这么漏掉的，构建 5349 的日志里
+  // suspect/hidden-playing/texture-lost 一条都没有）。只有固定时间线才能事后比对出
+  // 「卡死发生在哪一刻、当时各指标是什么」。
+  DateTime _lastTimelineAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _pipelineTimelinePeriod = Duration(seconds: 30);
+  // 已经下发过的视频输出表面尺寸，避免重复下发。
+  int? _appliedSurfaceWidth;
+  int? _appliedSurfaceHeight;
+  // 「画面冻结」判定的节流（静态画面可能误判，别把日志刷满）。
+  DateTime _lastPictureFrozenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _pictureFrozenCooldown = Duration(seconds: 30);
+
+  // Rect 在 AOT 下 toString() 会打成 "Instance of 'Rect'"，所以自己拼数值。
+  static String _rectDesc(ui.Rect? r) => r == null
+      ? 'null'
+      : '${r.left.toInt()},${r.top.toInt()},'
+            '${r.width.toInt()}x${r.height.toInt()}';
+
+  /// 把视频输出（ANGLE 表面 + Flutter 纹理）的尺寸设成 mpv 报的显示尺寸。
+  ///
+  /// 这是**竖屏视频黑屏的修复**，机制如下（2026-09-14 由实机日志确认）：
+  ///
+  /// 实机证据：竖屏视频那张兜底日志 `video surface: rect not usable ...` 只对竖屏
+  /// 触发、横屏从不触发，说明 `rect` 对竖屏始终无效；而 `rect` 是原生
+  /// `VideoOutput::Resize()` 下发 `texture_update_callback_` 才有的 —— 也就是
+  /// **`Resize()` 从未带着有效尺寸执行过**，ANGLE 表面一直停在构造时的初始尺寸。
+  /// 于是 `VideoOutput::Render()` 里 `mpv_render_context_render()` 渲染到那个尺寸的
+  /// FBO 里，Flutter 读到的共享 D3D 纹理是**未初始化内容 —— 实测就是 0x80 灰**，
+  /// 正好对上用户描述的「竖屏灰色框、没有画面」。
+  /// （注意不是旋转问题：日志里竖屏是 `rotate=0 / dw=1080 / dh=1920`，没有对调。）
+  ///
+  /// 为什么调用 setSize 能修：native 的 `SetSize()` 会直接给 `width_`/`height_` 赋值，
+  /// 而 `GetVideoWidth()/GetVideoHeight()` 一旦发现 `width_` 有值就**直接返回它、
+  /// 不再去查 `video-out-params`**。于是下一帧 `CheckAndResize()` 一定得到
+  /// 「required != current」，必然执行 `Resize()` → 表面与纹理被重建为正确尺寸。
+  /// 换句话说：这条路径**绕开了那个让 Resize 不发生的未知原因**。
+  ///
+  /// 代价最低的「恢复画面」手段也是它：整条路径**完全不动播放位置**，
+  /// 所以即使误判（例如画面本来就是一帧静止画面）也只是白白重建一次表面。
+  Future<void> _applyVideoOutputSize({bool force = false}) async {
+    final ctr = _videoController;
+    if (ctr == null) return;
+    final w = _intProp('video-out-params/dw');
+    final h = _intProp('video-out-params/dh');
+    if (w == null || h == null || w < 1 || h < 1) return;
+    if (!force && _appliedSurfaceWidth == w && _appliedSurfaceHeight == h) {
+      return;
+    }
+    _appliedSurfaceWidth = w;
+    _appliedSurfaceHeight = h;
+    try {
+      if (force) {
+        // dart 侧 setSize 有「与上次相同就跳过」的缓存，先置空强制下发一次，
+        // 这样原生一定收到一次真实的尺寸变化并触发 Resize()。
+        final cleared = ctr.setSize();
+        if (cleared != null) await cleared;
+      }
+      final applied = ctr.setSize(width: w, height: h);
+      if (applied != null) await applied;
+    } catch (_) {}
+  }
+
+  /// 由画面像素采样发现「画面不再变化」时调用（见 PlVideoPlayer 的采样器）。
+  ///
+  /// 这类卡死在 mpv 侧没有任何信号（无丢帧、vf-fps 正常），只能由像素判定。
+  /// 先用代价最低、且**不动播放位置**的表面刷新去救；日志留一条完整快照。
+  ///
+  /// 误判是可能的（视频里本来就有长时间静止的画面），所以：
+  ///   - 动作选成「重建表面」而不是「跳转」—— 静态画面下重建一次完全无感；
+  ///   - 按 30s 节流，避免静态画面把日志刷满。
+  void onPictureFrozen() {
+    final now = DateTime.now();
+    if (now.difference(_lastPictureFrozenAt) < _pictureFrozenCooldown) return;
+    _lastPictureFrozenAt = now;
+    Utils.reportError(
+      'picture frozen (pixels unchanged while mpv reports healthy) -> '
+      'refreshing video surface',
+      null,
+    );
+    _logPipelineSnapshot('picture-frozen');
+    _applyVideoOutputSize(force: true);
+  }
 
   // 记一条管线快照。tag 用于区分触发时机（见上面的说明）。
   void _logPipelineSnapshot(String tag) {
@@ -1129,7 +1215,7 @@ class PlPlayerController with BlockConfigMixin {
       'rotate=${_mpvProp('video-out-params/rotate')} '
       // 应用侧：纹理与矩形（null / 1x1 就说明渲染端没建立起来）
       'texture-id=${_videoController?.id.value} '
-      'rect=${_videoController?.rect.value} '
+      'rect=${_rectDesc(_videoController?.rect.value)} '
       // 应用侧：竖屏判定、画面适配方式、片源尺寸
       'isVertical=$_isVertical videoFit=${videoFit.value.name} '
       'src=${width}x$height '
@@ -1330,7 +1416,7 @@ class PlPlayerController with BlockConfigMixin {
     });
   }
 
-  // 每个采样窗口调用一次：负责管线快照的两个一次性打点。
+  // 每个采样窗口调用一次：管线快照的打点，以及主动校正视频输出尺寸。
   void _pipelineTickDiagnostics() {
     if (_videoController?.id.value != null) {
       if (!_loggedPipelineReady) {
@@ -1346,6 +1432,18 @@ class PlPlayerController with BlockConfigMixin {
       _loggedPipelineReady = false;
       _pipelineReadyTicks = -1;
       _logPipelineSnapshot('texture-lost');
+    }
+
+    // 主动把视频输出尺寸校正成 mpv 报的显示尺寸。
+    // 竖屏视频靠这一步才能出现画面（详见 _applyVideoOutputSize 的注释）；
+    // 一旦 dw/dh 变化（换分辨率/切片源）会再下发一次。
+    _applyVideoOutputSize();
+
+    // 固定时间线：在播时每 30s 无条件记一条，供事后比对卡死前后的状态。
+    if (playerStatus.isPlaying &&
+        DateTime.now().difference(_lastTimelineAt) > _pipelineTimelinePeriod) {
+      _lastTimelineAt = DateTime.now();
+      _logPipelineSnapshot('tick');
     }
 
     // 「后台播放」开着 + 窗口被隐藏/最小化：播放仍在继续，但下面各种判定会
