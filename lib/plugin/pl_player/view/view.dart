@@ -42,6 +42,7 @@ import 'package:PiliPlus/plugin/pl_player/models/double_tap_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/gesture_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
+import 'package:PiliPlus/plugin/pl_player/widgets/simple_video.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/app_bar_ani.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/backward_seek.dart';
@@ -2002,6 +2003,17 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     return child;
   }
 
+  /// 片源宽高比（width / height），给 PlSimpleVideo 做兜底用。
+  ///
+  /// `PlPlayerController.width/height` 就是 setDataSource 传进来的原始尺寸，
+  /// 且已由 Dimension 模型处理过 rotate（rotate=1 时已把宽高对调），
+  /// 所以这里直接相除即可，不用再管旋转。
+  double? get _sourceAspectRatio {
+    final w = plPlayerController.width;
+    final h = plPlayerController.height;
+    return (w != null && h != null && w > 0 && h > 0) ? w / h : null;
+  }
+
   Widget get _videoWidget {
     return Container(
       clipBehavior: .none,
@@ -2040,10 +2052,14 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                   child: FittedBox(
                     fit: videoFit.boxFit,
                     alignment: widget.alignment,
-                    child: SimpleVideo(
+                    // ARM64 修改版：用自带的 PlSimpleVideo 替代 media_kit_video 的
+                    // SimpleVideo —— 后者在拿不到 rect / stream.size 时直接返回空
+                    // 盒子（外层是黑底，于是表现为"黑屏且无任何线索"），
+                    // 竖屏视频黑屏正是落在这条路径上。详见该文件头注释。
+                    child: PlSimpleVideo(
                       controller: plPlayerController.videoController!,
-                      fill: widget.fill,
                       aspectRatio: videoFit.aspectRatio,
+                      sourceAspectRatio: _sourceAspectRatio,
                     ),
                   ),
                 );
