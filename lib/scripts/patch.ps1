@@ -158,6 +158,14 @@ $patches_material = @($ModalBarrierPatchMaterial, $NavigationDrawerPatchMaterial
 # WOA 修改版：本 fork 只构建 Windows，pub 缓存固定用 LOCALAPPDATA 下的路径。
 $PubCacheDir = "$env:LOCALAPPDATA/Pub/Cache"
 
+# 确保 flutter pub get 已经跑过：后续给 material_ui 和 media_kit_video 打补丁
+# 都依赖 pub cache 里有对应的包源码。CI 上如果 patch.ps1 跑在 pub get 之前，
+# 这里主动跑一次保证补丁能找到目标。
+if (-not (Test-Path "$PubCacheDir/hosted/pub.dev") -or -not (Test-Path ".dart_tool/package_config.json")) {
+    Write-Host "running flutter pub get before patching dependencies..."
+    flutter pub get
+}
+
 try {
     $MaterialUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
         Where-Object { $_.Name -like "material_ui-*" } |
@@ -182,7 +190,7 @@ if (-not $MaterialUiDir) {
 Write-Host "material_ui dir: $($MaterialUiDir.FullName)"
 
 Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/material" -Filter *.patch | ForEach-Object {
-    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" | 
+    (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" |
         Set-Content -NoNewline $_.FullName
 }
 
@@ -211,3 +219,4 @@ try {
 } catch {
     throw "patch_media_kit_video.ps1 failed: $_"
 }
+
