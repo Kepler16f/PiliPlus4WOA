@@ -263,6 +263,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     _startPictureFreezeSampler();
 
+    // 让「窗口全屏」按钮的图标和真实窗口状态一致（用户可能直接点了标题栏的最大化）。
+    plPlayerController.syncWindowMaximized();
+
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 100),
@@ -876,6 +879,24 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         },
       ),
 
+      /// 窗口全屏（把窗口最大化、保留标题栏；与下面的无边框「全屏」区分）
+      BottomControlType.windowFullscreen => Obx(
+        () {
+          final maximized = plPlayerController.isWindowMaximized.value;
+          return ComBtn(
+            width: widgetWidth,
+            height: 30,
+            tooltip: maximized ? '退出窗口全屏' : '窗口全屏',
+            icon: Icon(
+              maximized ? Icons.close_fullscreen : Icons.open_in_full,
+              size: 22,
+              color: Colors.white,
+            ),
+            onTap: plPlayerController.toggleWindowFullscreen,
+          );
+        },
+      ),
+
       /// 全屏
       BottomControlType.fullscreen => ComBtn(
         width: widgetWidth,
@@ -913,6 +934,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       .subtitle,
       .speed,
       if (isNotFileSource && flag) .qa,
+      // 插在「画质」和「全屏」之间（ARM64 修改版）。
+      // 右组是按「右对齐」摆放的（PlayerBar 把它贴在 maxWidth - 宽度 处），
+      // 所以在这里插入一项，会让「画质」及其左侧的所有按钮整体左移一格，
+      // 而最右的「全屏」位置不变 —— 正是要的效果。
+      if (PlatformUtils.isDesktop && !plPlayerController.isDesktopPip)
+        .windowFullscreen,
       if (!plPlayerController.isDesktopPip) .fullscreen,
     ];
     return PlayerBar(

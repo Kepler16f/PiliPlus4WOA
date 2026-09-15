@@ -196,3 +196,18 @@ foreach ($patch in $patches_material) {
         throw "$LASTEXITCODE"
     }
 }
+
+# WOA 修改版：给 media_kit_video 的 Windows 原生渲染路径打补丁
+# （画面冻结的取证计数器 + SetSize 的锁修复）。
+# 必须在 flutter pub get 之后 —— 那时 pub cache 里才有 media-kit 的 git 检出。
+# 用锚点字符串替换而不是 git apply 的上下文补丁：那个目录名带 commit hash、
+# 内容会随 pin 变化，上下文补丁对不上行号就会失败或错位；
+# 而锚点找不到会直接 throw，让 CI 明确报错而不是悄悄漏打。
+try {
+    & "$env:GITHUB_WORKSPACE/lib/scripts/patch_media_kit_video.ps1"
+    if ($LASTEXITCODE -ne 0) {
+        throw "exit code $LASTEXITCODE"
+    }
+} catch {
+    throw "patch_media_kit_video.ps1 failed: $_"
+}

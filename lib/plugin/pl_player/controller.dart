@@ -2253,6 +2253,32 @@ class PlPlayerController with BlockConfigMixin {
     }
   }
 
+  // 「窗口全屏」：把窗口最大化（保留标题栏、占满屏幕），与 triggerFullScreen
+  // 的无边框原生全屏是两件不同的事，所以单独做一个按钮。
+  // 只用于桌面端；PiP 小窗下禁用（最大化会把 PiP 窗口撑开）。
+  final RxBool isWindowMaximized = false.obs;
+
+  /// 查询一次当前的最大化状态，用于让按钮图标和真实窗口一致
+  /// （用户也可能直接点标题栏的最大化按钮）。
+  Future<void> syncWindowMaximized() async {
+    if (!PlatformUtils.isDesktop || isDesktopPip) return;
+    try {
+      isWindowMaximized.value = await windowManager.isMaximized();
+    } catch (_) {}
+  }
+
+  Future<void> toggleWindowFullscreen() async {
+    if (!PlatformUtils.isDesktop || isDesktopPip) return;
+    try {
+      if (await windowManager.isMaximized()) {
+        await windowManager.unmaximize();
+      } else {
+        await windowManager.maximize();
+      }
+      isWindowMaximized.value = await windowManager.isMaximized();
+    } catch (_) {}
+  }
+
   // 全屏
   bool _fsProcessing = false;
   Future<void> triggerFullScreen({

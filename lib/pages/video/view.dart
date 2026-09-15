@@ -1324,7 +1324,18 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return TabBar(
         padding: .zero,
         dividerHeight: 0,
-        labelPadding: .zero,
+        // ARM64 修改版：改成「按内容宽度排布 + 统一左右内边距」。
+        //
+        // 原来是非滚动（TabBar 默认 fill），每个页签等宽、文字在格子里居中。
+        // 三个标题长度差很多（「相关视频」/「评论 12.3万」/「播放列表」），
+        // 居中摆放就没有任何共同的对齐边，看起来就是「文字没对齐」；
+        // 而且带计数的「评论」还可能顶出格子宽度，配合 overflow: .visible
+        // 会直接画到相邻页签上。
+        // 改成 isScrollable + tabAlignment: .start 后，每个页签按自身文字宽度
+        // 排布、间距由统一的 labelPadding 决定，既不会互相挤压，也不会溢出。
+        isScrollable: true,
+        tabAlignment: .start,
+        labelPadding: const EdgeInsets.symmetric(horizontal: 12),
         dividerColor: Colors.transparent,
         controller: videoDetailController.tabCtr,
         indicator: flag ? const BoxDecoration() : null,
@@ -1394,7 +1405,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                 child: Align(
                   alignment: .centerLeft,
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: 96.0 * tabs.length),
+                    // 页签现在是按内容宽度排布的（见 TabBar 的 isScrollable），
+                    // 所以上限按「每签 128」给，足够容纳「评论 12.3万」这种带计数的
+                    // 标题；真的超宽就让它横向滚动，而不是像原来那样把文字挤出格子。
+                    constraints: BoxConstraints(maxWidth: 128.0 * tabs.length),
                     child: tabBar(),
                   ),
                 ),
