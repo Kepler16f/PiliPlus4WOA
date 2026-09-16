@@ -86,6 +86,70 @@ import 'package:window_manager/window_manager.dart';
 
 part 'widgets.dart';
 
+/// 底部控制条（进度条 + 一排按钮）+ 头部控制条大致需要的高度，仅用于诊断。
+///
+/// 组成：头部 AppBarAni ≈ 46，底部 BottomControl ≈ 67（进度条 + 按钮排），
+/// 相加约 113。
+const double _kControlBarsNeededHeight = 113.0;
+
+/// 包住「头部 + 底部」两条控制条的盒子，**只为诊断而存在，不改任何布局**。
+///
+/// 背景：用户报「进度条跑到最上面、最下面一排功能按钮全没了」。
+/// 这两条控制条放在一个 `mainAxisAlignment: spaceBetween` 的 Column 里，
+/// 外面套着 `ClipRect`。一旦可用高度小于两条控制条之和，RenderFlex 会把
+/// 「剩余空间」压成 0，于是两条从**顶部开始堆叠**，ClipRect 再把下半截裁掉 ——
+/// 表现正是「只剩最上面一条进度条、按钮整排消失」。
+///
+/// 但我在本机无法复现，且用户已明确「暂停状态下一切正常」，所以先前的
+/// 「暂停 → 视频头折叠成 56px」推测不成立。因此这里**不下判断、不做条件渲染**，
+/// 只在高度确实不足以容纳两条控制条时记一条带数值的日志，把疑问一次问清楚：
+///   - 日志出现 → 就是盒子太矮，且数值直接告诉我们是被谁压矮的；
+///   - 日志不出现 → 盒子高度正常，问题在别处，得换方向查。
+class _ControlBarsBox extends StatelessWidget {
+  const _ControlBarsBox({required this.diagnostics, required this.child});
+
+  final ({
+    double maxWidth,
+    double maxHeight,
+    bool isFullScreen,
+    PlayerStatus Function() status,
+    bool Function() showControls,
+  })
+  diagnostics;
+  final Widget child;
+
+  /// 日志节流（防刷屏）。
+  static DateTime _lastLogAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.hasBoundedHeight &&
+            constraints.maxHeight < _kControlBarsNeededHeight) {
+          final now = DateTime.now();
+          if (now.difference(_lastLogAt) > const Duration(seconds: 10)) {
+            _lastLogAt = now;
+            Utils.reportError(
+              'control bars box too short: '
+              'box=${constraints.maxWidth.toInt()}'
+              'x${constraints.maxHeight.toInt()} '
+              'needed=$_kControlBarsNeededHeight '
+              'widget=${diagnostics.maxWidth.toInt()}'
+              'x${diagnostics.maxHeight.toInt()} '
+              'isFullScreen=${diagnostics.isFullScreen} '
+              'status=${diagnostics.status()} '
+              'showControls=${diagnostics.showControls()}',
+              null,
+            );
+          }
+        }
+        return child;
+      },
+    );
+  }
+}
+
 class PLVideoPlayer extends StatefulWidget {
   const PLVideoPlayer({
     required this.maxWidth,
@@ -876,56 +940,51 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         },
       ),
 
-      /// 窗口全屏（把视频播放器铺满当前应用窗口，保留顶栏和底栏；与无边框「全屏」区分）
+      /// 窗口全屏：把视频播放器铺满**当前应用窗口**（保留 App 自己的顶栏/底栏），
+      /// 与下面「全屏」（无边框原生全屏、跳出窗口）是两件事。
       ///
-      /// 实现就是 `inAppFullScreen: true`：`enterDesktopFullScreen()` 在这种情况
-      /// **不会**调用原生的 `Utils.EnterNativeFullscreen`，只把 `isFullScreen`
-      /// 置真、由布局把播放器撑满窗口。退出时同理不会动原生窗口。
+      /// 实现就是 `inAppFullScreen: true` —— `enterDesktopFullScreen()` 在这种
+      /// 情况**不会**调用原生的 `Utils.EnterNativeFullscreen`，只把 `isFullScreen`
+      /// 置真，由页面布局把播放器撑满窗口；退出时同样不动原生窗口。
       ///
       /// 图标与「全屏」互换（按用户要求）：
       ///   - 窗口全屏（铺满窗口）：fullscreen / fullscreen_exit
       ///   - 原生全屏（跳出窗口）：open_in_full / close_fullscreen
-      BottomControlType.windowFullscreen => Obx(
-        () {
-          final isFS = isFullScreen;
-          return ComBtn(
-            width: widgetWidth,
-            height: 30,
-            tooltip: isFS ? '退出窗口全屏' : '窗口全屏',
-            icon: Icon(
-              isFS ? Icons.fullscreen_exit : Icons.fullscreen,
-              size: 24,
-              color: Colors.white,
-            ),
-            onTap: () => plPlayerController.triggerFullScreen(
-              status: !isFS,
-              inAppFullScreen: true,
-            ),
-          );
-        },
+      ///
+      /// 写法刻意与旁边的按钮保持一致（不加 Obx）：这个子树本来就会随
+      /// isFullScreen 重建（页面上层有 Obx 依赖它，会以新的 maxWidth/maxHeight
+      /// 重建 PLVideoPlayer），图标照样会翻转，少一层包装就少一个布局变量。
+      BottomControlType.windowFullscreen => ComBtn(
+        width: widgetWidth,
+        height: 30,
+        tooltip: isFullScreen ? '退出窗口全屏' : '窗口全屏',
+        icon: Icon(
+          isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+          size: 24,
+          color: Colors.white,
+        ),
+        onTap: () => plPlayerController.triggerFullScreen(
+          status: !isFullScreen,
+          inAppFullScreen: true,
+        ),
       ),
 
       /// 全屏（无边框原生全屏，跳出当前窗口）
-      BottomControlType.fullscreen => Obx(
-        () {
-          final isFS = isFullScreen;
-          return ComBtn(
-            width: widgetWidth,
-            height: 30,
-            tooltip: isFS ? '退出全屏' : '全屏',
-            icon: Icon(
-              isFS ? Icons.close_fullscreen : Icons.open_in_full,
-              size: 20,
-              color: Colors.white,
-            ),
-            onTap: () =>
-                plPlayerController.triggerFullScreen(status: !isFS),
-            onSecondaryTap: () => plPlayerController.triggerFullScreen(
-              status: !isFS,
-              inAppFullScreen: true,
-            ),
-          );
-        },
+      BottomControlType.fullscreen => ComBtn(
+        width: widgetWidth,
+        height: 30,
+        tooltip: isFullScreen ? '退出全屏' : '全屏',
+        icon: Icon(
+          isFullScreen ? Icons.close_fullscreen : Icons.open_in_full,
+          size: 24,
+          color: Colors.white,
+        ),
+        onTap: () =>
+            plPlayerController.triggerFullScreen(status: !isFullScreen),
+        onSecondaryTap: () => plPlayerController.triggerFullScreen(
+          status: !isFullScreen,
+          inAppFullScreen: true,
+        ),
       ),
     };
 
@@ -949,10 +1008,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       .subtitle,
       .speed,
       if (isNotFileSource && flag) .qa,
-      // 插在「画质」和「全屏」之间（ARM64 修改版）。
+      // 「窗口全屏」插在「画质」和「全屏」之间（ARM64 修改版）。
       // 右组是按「右对齐」摆放的（PlayerBar 把它贴在 maxWidth - 宽度 处），
       // 所以在这里插入一项，会让「画质」及其左侧的所有按钮整体左移一格，
-      // 而最右的「全屏」位置不变 —— 正是要的效果。
+      // 而最右的「全屏」位置保持不变 —— 正是要的排布。
       if (PlatformUtils.isDesktop && !plPlayerController.isDesktopPip)
         .windowFullscreen,
       if (!plPlayerController.isDesktopPip) .fullscreen,
@@ -1632,41 +1691,54 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           bottom: -1,
           child: ClipRect(
             child: RepaintBoundary(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  AppBarAni(
-                    isTop: true,
-                    controller: _animationController,
-                    isFullScreen: isFullScreen,
-                    removeSafeArea: plPlayerController.removeSafeArea,
-                    child: plPlayerController.isDesktopPip
-                        ? GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onPanStart: (_) => windowManager.startDragging(),
-                            child: widget.headerControl,
-                          )
-                        : widget.headerControl,
-                  ),
-                  AppBarAni(
-                    isTop: false,
-                    controller: _animationController,
-                    isFullScreen: isFullScreen,
-                    removeSafeArea: plPlayerController.removeSafeArea,
-                    child:
-                        widget.bottomControl ??
-                        BottomControl(
-                          maxWidth: maxWidth,
-                          isFullScreen: isFullScreen,
-                          controller: plPlayerController,
-                          videoDetailController: videoDetailController,
-                          buildBottomControl: () => buildBottomControl(
-                            videoDetailController,
-                            maxWidth > maxHeight,
+              child: _ControlBarsBox(
+                // 纯诊断：把这个盒子与底部控制条的实际高度记下来。
+                // 见 _ControlBarsBox 的注释 —— 它不做任何条件渲染，只负责
+                // 在「盒子装不下两条控制条」时记一条日志，用于定位
+                // 「进度条跑到最上面、按钮整排消失」到底是不是盒子太矮。
+                diagnostics: (
+                  maxWidth: maxWidth,
+                  maxHeight: maxHeight,
+                  isFullScreen: isFullScreen,
+                  status: () => plPlayerController.playerStatus.value,
+                  showControls: () => plPlayerController.showControls.value,
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    AppBarAni(
+                      isTop: true,
+                      controller: _animationController,
+                      isFullScreen: isFullScreen,
+                      removeSafeArea: plPlayerController.removeSafeArea,
+                      child: plPlayerController.isDesktopPip
+                          ? GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onPanStart: (_) => windowManager.startDragging(),
+                              child: widget.headerControl,
+                            )
+                          : widget.headerControl,
+                    ),
+                    AppBarAni(
+                      isTop: false,
+                      controller: _animationController,
+                      isFullScreen: isFullScreen,
+                      removeSafeArea: plPlayerController.removeSafeArea,
+                      child:
+                          widget.bottomControl ??
+                          BottomControl(
+                            maxWidth: maxWidth,
+                            isFullScreen: isFullScreen,
+                            controller: plPlayerController,
+                            videoDetailController: videoDetailController,
+                            buildBottomControl: () => buildBottomControl(
+                              videoDetailController,
+                              maxWidth > maxHeight,
+                            ),
                           ),
-                        ),
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

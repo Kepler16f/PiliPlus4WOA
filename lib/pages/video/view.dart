@@ -1324,18 +1324,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return TabBar(
         padding: .zero,
         dividerHeight: 0,
-        // ARM64 修改版：改成「按内容宽度排布 + 统一左右内边距」。
-        //
-        // 原来是非滚动（TabBar 默认 fill），每个页签等宽、文字在格子里居中。
-        // 三个标题长度差很多（「相关视频」/「评论 12.3万」/「播放列表」），
-        // 居中摆放就没有任何共同的对齐边，看起来就是「文字没对齐」；
-        // 而且带计数的「评论」还可能顶出格子宽度，配合 overflow: .visible
-        // 会直接画到相邻页签上。
-        // 改成 isScrollable + tabAlignment: .start 后，每个页签按自身文字宽度
-        // 排布、间距由统一的 labelPadding 决定，既不会互相挤压，也不会溢出。
-        isScrollable: true,
-        tabAlignment: .start,
-        labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+        labelPadding: .zero,
         dividerColor: Colors.transparent,
         controller: videoDetailController.tabCtr,
         indicator: flag ? const BoxDecoration() : null,
@@ -1366,40 +1355,57 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           }
         },
         tabs: tabs.map((text) {
-          // ARM64 修改版（2026-09-16）：只统一**行高**，其它一律保持原样。
+          // ARM64 修改版（2026-09-16）：修「三个标题文字上下高度不一样」。
           //
-          // 上一版为了「上下对齐」额外写了 `Tab(height: 45, child: Center(...))`，
-          // 那属于改 Flutter 的内置布局约定：`Tab.build` 本身就是
-          // `SizedBox(height: height ?? _kTabHeight, child: Center(widthFactor: 1.0, child: label))`，
-          // 而 TabBar 的 preferredSize 又以 `_kTabHeight`(46) 为基准，外层容器还写死
-          // 了 `SizedBox(height: 45)` —— 三处高度互相牵扯，不该再由应用层去覆盖。
-          // 现已退回 `Tab(child: ...)` 的原样。
+          // 关键约束：**只约束每个标题自己的高度，绝不碰 Tab / TabBar 的高度**，
+          // 也不改任何横向排布（labelPadding / isScrollable 一律保持上游原样）。
           //
-          // 「三个标题上下高度不一致」的真正原因是**行高**：带计数的「评论 12.3万」
-          // 里数字和「万」可能落到不同的字体回退上，行高因此和另外两个纯文字标题
-          // 不同，而 Tab 是垂直居中，行高不同 → baseline 就不同。
-          // 给所有标题统一 `TextStyle(height: 1.0)` 把行高钉死为字号本身即可消除，
-          // 不动任何布局结构。
-          Widget labelWidget;
+          // Tab.build 内部是
+          //   SizedBox(height: height ?? _kTabHeight, child: Center(widthFactor: 1.0, child: label))
+          // 即 Tab 会把 label 垂直居中放进自己的 46px 盒子里。所以只要三个 label 的
+          // **高度完全一致**，居中后的基线就必然一致。
+          //
+          // 「评论 12.3万」会调用 numFormat 生成「12.3万」这类混排（数字 + 汉字 +
+          // 小数点），可能落到不同的字体回退上，行高于是与「相关视频」「播放列表」
+          // 两个纯文本不同 → 居中的基线就偏了。
+          //
+          // 这里给每个 label 套一个固定高度的盒子把高度钉死：
+          //   - 高度写死 → 与字体回退、混排、Obx 重建全都无关；
+          //   - 不限制宽度 → label 仍按文字自然宽度，横向表现一字不改；
+          //   - 盒内再 Center → 因为盒子等高，基线也就齐了。
+          // 影响范围严格限于「标题自己那 20px」，Tab 与 TabBar 的高度、页签条的
+          // 45px、以及播放器都不受影响。
+          const labelStyle = TextStyle(height: 1.0);
+          Widget label(Widget child) => SizedBox(
+            height: 20,
+            child: Center(child: child),
+          );
+
           if (text == '评论') {
-            labelWidget = Obx(() {
-              final count = _videoReplyController.count.value;
-              return Text(
-                '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
-                softWrap: false,
-                overflow: .visible,
-                style: const TextStyle(height: 1.0),
-              );
-            });
-          } else {
-            labelWidget = Text(
-              text,
-              softWrap: false,
-              overflow: .visible,
-              style: const TextStyle(height: 1.0),
+            return Tab(
+              child: label(
+                Obx(() {
+                  final count = _videoReplyController.count.value;
+                  return Text(
+                    '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
+                    softWrap: false,
+                    overflow: .visible,
+                    style: labelStyle,
+                  );
+                }),
+              ),
             );
           }
-          return Tab(child: labelWidget);
+          return Tab(
+            child: label(
+              Text(
+                text,
+                softWrap: false,
+                overflow: .visible,
+                style: labelStyle,
+              ),
+            ),
+          );
         }).toList(),
       );
     }
@@ -1423,10 +1429,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                 child: Align(
                   alignment: .centerLeft,
                   child: ConstrainedBox(
-                    // 页签现在是按内容宽度排布的（见 TabBar 的 isScrollable），
-                    // 所以上限按「每签 128」给，足够容纳「评论 12.3万」这种带计数的
-                    // 标题；真的超宽就让它横向滚动，而不是像原来那样把文字挤出格子。
-                    constraints: BoxConstraints(maxWidth: 128.0 * tabs.length),
+                    constraints: BoxConstraints(maxWidth: 96.0 * tabs.length),
                     child: tabBar(),
                   ),
                 ),
