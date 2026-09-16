@@ -131,6 +131,11 @@ $TraceHeader = @'
 #include <cstdlib>
 #include <string>
 
+// MSVC treats C4996 as error (error C2220: the following warning is treated as
+// an error: getenv/fopen unsafe). Suppress it for this diagnostics block.
+#pragma warning(push)
+#pragma warning(disable : 4996)
+
 struct MKVideoTrace {
   long long video_render = 0;
   long long video_no_texture = 0;
@@ -163,8 +168,9 @@ struct MKVideoTrace {
     if (!started) {
       started = true;
       last_tick = now;
-      const char* dir = std::getenv("TEMP");
-      path = std::string(dir != nullptr ? dir : ".") +
+      char buf[MAX_PATH] = {0};
+      const DWORD n = ::GetTempPathA(MAX_PATH, buf);
+      path = std::string(n > 0 && n < MAX_PATH ? buf : ".") +
              "\\piliplus_angle_trace.log";
       return;
     }
@@ -190,8 +196,8 @@ struct MKVideoTrace {
     l_angle_null = angle_null;
     l_angle_mcfail = angle_mcfail;
     l_angle_build = angle_build;
-    FILE* f = std::fopen(path.c_str(), "a");
-    if (f != nullptr) {
+    FILE* f = nullptr;
+    if (::fopen_s(&f, path.c_str(), "a") == 0 && f != nullptr) {
       std::fprintf(f,
                    "t=%lu render=%lld noTex=%lld cb=%lld read=%lld mark=%lld "
                    "draw=%lld aread=%lld null=%lld mcFail=%lld build=%lld\n",
@@ -203,6 +209,8 @@ struct MKVideoTrace {
     }
   }
 };
+
+#pragma warning(pop)
 
 extern MKVideoTrace g_mkTrace;
 
