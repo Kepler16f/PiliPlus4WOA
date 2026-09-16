@@ -1366,6 +1366,20 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           }
         },
         tabs: tabs.map((text) {
+          // ARM64 修改版（2026-09-16）：只统一**行高**，其它一律保持原样。
+          //
+          // 上一版为了「上下对齐」额外写了 `Tab(height: 45, child: Center(...))`，
+          // 那属于改 Flutter 的内置布局约定：`Tab.build` 本身就是
+          // `SizedBox(height: height ?? _kTabHeight, child: Center(widthFactor: 1.0, child: label))`，
+          // 而 TabBar 的 preferredSize 又以 `_kTabHeight`(46) 为基准，外层容器还写死
+          // 了 `SizedBox(height: 45)` —— 三处高度互相牵扯，不该再由应用层去覆盖。
+          // 现已退回 `Tab(child: ...)` 的原样。
+          //
+          // 「三个标题上下高度不一致」的真正原因是**行高**：带计数的「评论 12.3万」
+          // 里数字和「万」可能落到不同的字体回退上，行高因此和另外两个纯文字标题
+          // 不同，而 Tab 是垂直居中，行高不同 → baseline 就不同。
+          // 给所有标题统一 `TextStyle(height: 1.0)` 把行高钉死为字号本身即可消除，
+          // 不动任何布局结构。
           Widget labelWidget;
           if (text == '评论') {
             labelWidget = Obx(() {
@@ -1385,17 +1399,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
               style: const TextStyle(height: 1.0),
             );
           }
-          // ARM64 修改版：用 SizedBox 强制把每个 Tab 的高度锁死在 45（外层 Row 的高），
-          // 并把文字放进 Center。
-          // 原来不指定高度，Flutter Tab 内部默认高度是 46（_kTabHeight），
-          // 而外层 SizedBox 只有 45，导致每个 Tab 被挤压；更关键的是，带 Obx 的
-          // 「评论」会因为响应式重建和不同的文字度量出现微小的基线抖动，
-          // 用户肉眼看到的就是「三个标题文字上下高度不一致」。
-          // 统一用 height: 45 + Center 居中即可彻底消除上下差异。
-          return Tab(
-            height: 45,
-            child: Center(child: labelWidget),
-          );
+          return Tab(child: labelWidget);
         }).toList(),
       );
     }
