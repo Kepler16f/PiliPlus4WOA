@@ -1366,22 +1366,36 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           }
         },
         tabs: tabs.map((text) {
+          Widget labelWidget;
           if (text == '评论') {
-            return Obx(() {
+            labelWidget = Obx(() {
               final count = _videoReplyController.count.value;
-              return Tab(
-                child: Text(
-                  '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
-                  softWrap: false,
-                  overflow: .visible,
-                ),
+              return Text(
+                '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
+                softWrap: false,
+                overflow: .visible,
+                style: const TextStyle(height: 1.0),
               );
             });
           } else {
-            return Tab(
-              child: Text(text, softWrap: false, overflow: .visible),
+            labelWidget = Text(
+              text,
+              softWrap: false,
+              overflow: .visible,
+              style: const TextStyle(height: 1.0),
             );
           }
+          // ARM64 修改版：用 SizedBox 强制把每个 Tab 的高度锁死在 45（外层 Row 的高），
+          // 并把文字放进 Center。
+          // 原来不指定高度，Flutter Tab 内部默认高度是 46（_kTabHeight），
+          // 而外层 SizedBox 只有 45，导致每个 Tab 被挤压；更关键的是，带 Obx 的
+          // 「评论」会因为响应式重建和不同的文字度量出现微小的基线抖动，
+          // 用户肉眼看到的就是「三个标题文字上下高度不一致」。
+          // 统一用 height: 45 + Center 居中即可彻底消除上下差异。
+          return Tab(
+            height: 45,
+            child: Center(child: labelWidget),
+          );
         }).toList(),
       );
     }

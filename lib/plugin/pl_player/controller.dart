@@ -1175,22 +1175,29 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 由画面像素采样发现「画面不再变化」时调用（见 PlVideoPlayer 的采样器）。
   ///
-  /// 这是**唯一**能发现这类卡死的信号：构建 5350 的实机日志证明，卡死时
-  /// `estimated-vf-fps` 照常 30、`decoder-drop=0`、`core-idle=no`、缓存满
-  /// （demuxer-cache-time=4022s），所有常规判据都看不出问题；
-  /// 只有两个数字暴露了它：**像素不变**，以及 **vo-drop=40**。
+  /// 为什么必须靠像素：构建 5350 的实机日志证明，卡死时
+  /// `estimated-vf-fps` 照常 30、`decoder-drop=0`、`core-idle=no`、
+  /// `paused-for-cache=no`，demuxer 缓存稳定在 ~15s（= cache-secs 16，**没有溢出**）。
+  /// mpv 侧一切正常，唯一暴露它的信号就是「屏幕像素不再变化」。
   ///
-  /// 机制因此是明确的：VO 在**缓慢**丢帧（每 2 秒不足 10 帧，够不到
-  /// `_stallDropDelta` 的阈值），视频 pts 逐步落到音频后面 → 画面停在原地、
-  /// 声音继续。**这是时间轴问题，不是渲染表面问题。**
+  /// 关键旁证：用户反馈卡死时**弹幕照常跑**。弹幕是 Flutter 自己渲染的，
+  /// 说明光栅线程与合成器都健康 —— 断点只可能在「视频纹理这一条链路」上
+  /// （GpuSurfaceTexture 回调 → 共享句柄拷贝 → 引擎上传），而不是整个 UI 停摆，
+  /// 也不是解复用/缓存问题。
   ///
-  /// 恢复动作因此是**把视频重新对齐到音频时钟的当前位置**，而不是重建表面：
-  ///   - 视频落后时：这一步把画面直接拉到音频所在处，冻结立刻解除；因为
-  ///     **音频位置一点没动**，用户几乎察觉不到（不像"往回跳"那样会重复一段）。
-  ///   - 万一是误判（视频里本来就有静止画面）：跳到"当前位置"相当于原地重跳，
-  ///     音频不动，副作用仅仅是解码器重建的一次极短闪动。
-  /// 反复出现说明重对齐救不回来（例如解码器/VO 真的坏了）→ 升级为 refreshPlayer
-  /// 重建整条解码+渲染链。
+  /// 两种冻结在数据上完全不同，恢复手段也不同：
+  ///  A. vo-drop **持平**、vf-fps 正常：mpv 认为一切正常、帧也在出，只有屏幕不动
+  ///     → 断点在上述纹理链路，靠**重建表面**能救。
+  ///     实机 20:06:38 那次就是这样（vo-drop 停在 40 不动，冻结持续数分钟）。
+  ///  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 跳转重新对齐即可。
+  ///
+  /// 恢复阶梯（每级 10s 冷却，长时间不再冻则计数归零），**必须保证能收敛**：
+  ///   1~2 级：重建视频输出表面/纹理（不动播放位置）
+  ///   3   级：再叠一次「对齐到音频时钟的当前位置」（不是往回跳，音频不动，
+  ///          所以即使误判也只是原地重跳，不丢进度）
+  ///   4 级起：`refreshPlayer()` 重建整条解码+渲染链，然后计数归零
+  /// 之前这里 3 级以后会**永远**重复「重建表面 + 原地重跳」而从不升级，
+  /// 遇到真正被钉死的状态就会无限空转 —— 这是本次修的缺陷。
   void onPictureFrozen() {
     if (_playerCount == 0) return;
     final now = DateTime.now();
@@ -1206,23 +1213,17 @@ class PlPlayerController with BlockConfigMixin {
 
     final drops = _intProp('frame-drop-count') ?? 0;
     final prevDrops = _pictureFrozenDrops;
-    // 两种冻结在数据上完全不同，恢复手段也不同：
-    //  A. vo-drop **持平**、vf-fps 正常：mpv 认为一切正常、帧也在出，只有屏幕不动
-    //     → 断点在「ANGLE 表面 → 共享纹理 → 合成」，靠**重建表面**能救。
-    //     实机 20:06:38 那次就是这样（vo-drop 停在 40 不动，冻结持续数分钟）。
-    //  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 必须跳转重新对齐。
     final dropsGrowing = prevDrops != null && drops > prevDrops;
     _pictureFrozenDrops = drops;
 
-    // 动作按代价递进；前两步都**不动播放位置**，所以视频里本来就有静止画面时
-    // 误判的代价也只是一次重建/一次原地重跳，绝不会把进度弄丢。
-    if (dropsGrowing && _pictureFrozenCount > 2) {
-      // B 类且反复发生 → 重建整条解码/渲染链
+    // 4 级起（或 B 类反复出现）：整条链重建，计数归零重新开始。
+    if (_pictureFrozenCount >= 4 || (dropsGrowing && _pictureFrozenCount > 2)) {
       _pictureFrozenCount = 0;
       Utils.reportError(
-        'picture frozen #(recovering by refreshPlayer): vo-drop=$prevDrops->$drops '
-        'vf-fps=${_mpvProp('estimated-vf-fps')} '
-        'decoder-drop=${_mpvProp('decoder-frame-drop-count')}',
+        'picture frozen: escalating to refreshPlayer '
+        '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
+        'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
+        'time-pos=${positionInMilliseconds ~/ 1000}s)',
         null,
       );
       _logPipelineSnapshot('picture-frozen');
@@ -1235,20 +1236,20 @@ class PlPlayerController with BlockConfigMixin {
       '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
       'core-idle=${_mpvProp('core-idle')} '
+      'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
-      '-> ${_pictureFrozenCount <= 2 ? 'refresh video surface' : 'refresh surface + resync video pts to the audio clock'}',
+      '-> ${_pictureFrozenCount <= 2 ? 'refresh video surface' : 'refresh surface + resync video pts'}',
       null,
     );
     _logPipelineSnapshot('picture-frozen');
 
-    // 第 1、2 次（以及所有 A 类）：重建视频输出表面与纹理 —— 不动播放位置。
-    // 表面迟早会重建：它绕开「Resize 没发生 / 纹理内容陈旧」这一类断点。
+    // 第 1、2 次：重建视频输出表面与纹理 —— 不动播放位置。
+    // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点。
     _applyVideoOutputSize(force: true);
 
     if (_pictureFrozenCount > 2) {
-      // 重建表面连续两次都没救回来 → 再叠一次「对齐到音频时钟当前位置」。
-      // 注意是**当前位置**而不是往回跳：音频不动，所以即使误判也只是原地重跳。
+      // 重建表面连两次都没救回来 → 再叠一次「对齐到音频时钟当前位置」。
       seekTo(
         Duration(milliseconds: positionInMilliseconds),
         isSeek: false,
@@ -2251,32 +2252,6 @@ class PlPlayerController with BlockConfigMixin {
         }
       }
     }
-  }
-
-  // 「窗口全屏」：把窗口最大化（保留标题栏、占满屏幕），与 triggerFullScreen
-  // 的无边框原生全屏是两件不同的事，所以单独做一个按钮。
-  // 只用于桌面端；PiP 小窗下禁用（最大化会把 PiP 窗口撑开）。
-  final RxBool isWindowMaximized = false.obs;
-
-  /// 查询一次当前的最大化状态，用于让按钮图标和真实窗口一致
-  /// （用户也可能直接点标题栏的最大化按钮）。
-  Future<void> syncWindowMaximized() async {
-    if (!PlatformUtils.isDesktop || isDesktopPip) return;
-    try {
-      isWindowMaximized.value = await windowManager.isMaximized();
-    } catch (_) {}
-  }
-
-  Future<void> toggleWindowFullscreen() async {
-    if (!PlatformUtils.isDesktop || isDesktopPip) return;
-    try {
-      if (await windowManager.isMaximized()) {
-        await windowManager.unmaximize();
-      } else {
-        await windowManager.maximize();
-      }
-      isWindowMaximized.value = await windowManager.isMaximized();
-    } catch (_) {}
   }
 
   // 全屏

@@ -263,9 +263,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     _startPictureFreezeSampler();
 
-    // 让「窗口全屏」按钮的图标和真实窗口状态一致（用户可能直接点了标题栏的最大化）。
-    plPlayerController.syncWindowMaximized();
-
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 100),
@@ -879,38 +876,56 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         },
       ),
 
-      /// 窗口全屏（把窗口最大化、保留标题栏；与下面的无边框「全屏」区分）
+      /// 窗口全屏（把视频播放器铺满当前应用窗口，保留顶栏和底栏；与无边框「全屏」区分）
+      ///
+      /// 实现就是 `inAppFullScreen: true`：`enterDesktopFullScreen()` 在这种情况
+      /// **不会**调用原生的 `Utils.EnterNativeFullscreen`，只把 `isFullScreen`
+      /// 置真、由布局把播放器撑满窗口。退出时同理不会动原生窗口。
+      ///
+      /// 图标与「全屏」互换（按用户要求）：
+      ///   - 窗口全屏（铺满窗口）：fullscreen / fullscreen_exit
+      ///   - 原生全屏（跳出窗口）：open_in_full / close_fullscreen
       BottomControlType.windowFullscreen => Obx(
         () {
-          final maximized = plPlayerController.isWindowMaximized.value;
+          final isFS = isFullScreen;
           return ComBtn(
             width: widgetWidth,
             height: 30,
-            tooltip: maximized ? '退出窗口全屏' : '窗口全屏',
+            tooltip: isFS ? '退出窗口全屏' : '窗口全屏',
             icon: Icon(
-              maximized ? Icons.close_fullscreen : Icons.open_in_full,
-              size: 22,
+              isFS ? Icons.fullscreen_exit : Icons.fullscreen,
+              size: 24,
               color: Colors.white,
             ),
-            onTap: plPlayerController.toggleWindowFullscreen,
+            onTap: () => plPlayerController.triggerFullScreen(
+              status: !isFS,
+              inAppFullScreen: true,
+            ),
           );
         },
       ),
 
-      /// 全屏
-      BottomControlType.fullscreen => ComBtn(
-        width: widgetWidth,
-        height: 30,
-        tooltip: isFullScreen ? '退出全屏' : '全屏',
-        icon: isFullScreen
-            ? const Icon(Icons.fullscreen_exit, size: 24, color: Colors.white)
-            : const Icon(Icons.fullscreen, size: 24, color: Colors.white),
-        onTap: () =>
-            plPlayerController.triggerFullScreen(status: !isFullScreen),
-        onSecondaryTap: () => plPlayerController.triggerFullScreen(
-          status: !isFullScreen,
-          inAppFullScreen: true,
-        ),
+      /// 全屏（无边框原生全屏，跳出当前窗口）
+      BottomControlType.fullscreen => Obx(
+        () {
+          final isFS = isFullScreen;
+          return ComBtn(
+            width: widgetWidth,
+            height: 30,
+            tooltip: isFS ? '退出全屏' : '全屏',
+            icon: Icon(
+              isFS ? Icons.close_fullscreen : Icons.open_in_full,
+              size: 20,
+              color: Colors.white,
+            ),
+            onTap: () =>
+                plPlayerController.triggerFullScreen(status: !isFS),
+            onSecondaryTap: () => plPlayerController.triggerFullScreen(
+              status: !isFS,
+              inAppFullScreen: true,
+            ),
+          );
+        },
       ),
     };
 
