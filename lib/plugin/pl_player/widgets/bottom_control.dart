@@ -2,7 +2,6 @@ import 'package:PiliPlus/common/widgets/progress_bar/audio_video_progress_bar.da
 import 'package:PiliPlus/common/widgets/progress_bar/segment_progress_bar.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
-import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/view/view.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
@@ -132,10 +131,14 @@ class BottomControl extends StatelessWidget {
 /// （`_reloadAtCurrentPosition`），重开必然要重新缓冲；而恢复的另一条路径是
 /// 「重建视频输出表面」。这两段时间里**声音和画面都会短暂停住、弹幕照常跑**，
 /// 用户完全看不出是在自愈，只觉得播放器又坏了。
-/// 这里把控制器的 `isBuffering` 直接映射成一个转圈 + 文案，让自愈过程可感知。
+/// 这里把控制器的 `isRecovering` 直接映射成一个转圈 + 文案，让自愈过程可感知。
 ///
-/// 只在**确实在播放**时显示：用户主动暂停不该弹加载圈
-/// （暂停时 `isBuffering` 也可能是 true，语义完全不同）。
+/// 只在**确实在自愈**时显示（`isRecovering`，2026-09-17 改）：
+///   - 原来盯的是 `isBuffering`，而「拖动进度条 → 跳转要重新缓冲」也会置它，
+///     于是自愈圈和常规缓冲圈会同时出现、叠在一起（用户报的重叠）。
+///   - 现在只认 `isRecovering`（只有 `_reloadAtCurrentPosition` 会置），
+///     而常规缓冲指示反过来会在它置位时让位 —— 两者从构造上互斥。
+/// 另外只在**确实在播放**时显示：用户主动暂停不该弹加载圈。
 class PlPlayerLoadingIndicator extends StatelessWidget {
   const PlPlayerLoadingIndicator({super.key, required this.controller});
 
@@ -145,7 +148,7 @@ class PlPlayerLoadingIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     return Obx(() {
       final visible =
-          controller.isBuffering.value && controller.playerStatus.isPlaying;
+          controller.isRecovering.value && !controller.isSeeking.value;
       if (!visible) {
         return const SizedBox.shrink();
       }

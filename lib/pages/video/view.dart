@@ -1321,6 +1321,48 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
     Widget tabBar() {
       final flag = !needIndicator || tabs.length == 1;
+      // ── 「简介 / 评论 / 播放列表」三个标题必须共用同一套文字度量（ARM64 修改版）──
+      //
+      // 前三次尝试都基于「行高/布局」这一条线（固定高度盒子 → height:1.0 →
+      // Align），都没解决。这一次不再依赖任何隐式推导，而是把**决定基线的每一个
+      // 输入都显式钉死，并且三个标题共用同一份**：
+      //
+      // 1. `labelStyle` 与 `unselectedLabelStyle` 传**同一个对象**。
+      //    material_ui 的 _TabStyle 对选中/未选中分别用
+      //    `defaults.labelStyle.merge(labelStyle ?? theme.labelStyle)` 与
+      //    `defaults.unselectedLabelStyle.merge(unselectedLabelStyle ?? theme.unselectedLabelStyle ?? labelStyle)`
+      //    合成样式；只要有一侧没传，两侧就可能落到不同的 fontWeight/fontFamily
+      //    （M3 默认两侧都是 titleSmall，但主题一旦自定义文字就会分叉）。
+      //    同一个对象喂给两边，选中态与未选中态在度量上就不可能不同。
+      //
+      // 2. 每个标题显式传**同一份 StrutStyle**（forceStrutHeight: true）与同一份
+      //    `TextStyle(height: 1.0)`。行盒的上/下沿与基线从此由这份 strut 决定，
+      //    而 strut 对三个标题完全相同 —— 与标题里是纯汉字（简介 / 播放列表）
+      //    还是汉字+数字+小数点混排（评论 12.3万）无关，与这些字最终落到哪个
+      //    字体回退上无关。这是唯一能真正隔离「字体回退带来的度量差异」的手段。
+      //    颜色仍走继承 —— 选中/未选中的颜色由 _TabStyle 下发，这里**不能**传
+      //    color，否则会把两态的颜色一起盖掉。
+      //
+      // 布局结构一律不动：仍然是 `Tab(child: ...)`，仍然不设 Tab/TabBar 高度，
+      // labelPadding / isScrollable / tabAlignment 全部保持上游原样。
+      final baseLabelStyle = TabBarTheme.of(context).labelStyle ?? const TextStyle();
+      final labelStyle = baseLabelStyle.copyWith(fontSize: 13, height: 1.0);
+      const labelTextStyle = TextStyle(height: 1.0);
+      const labelStrut = StrutStyle(
+        fontSize: 13,
+        height: 1.0,
+        forceStrutHeight: true,
+      );
+
+      /// 三个标题唯一的构造入口 —— 除文字内容外不允许有任何差异。
+      Text buildLabel(String text) => Text(
+        text,
+        softWrap: false,
+        overflow: .visible,
+        style: labelTextStyle,
+        strutStyle: labelStrut,
+      );
+
       return TabBar(
         padding: .zero,
         dividerHeight: 0,
@@ -1329,9 +1371,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         controller: videoDetailController.tabCtr,
         indicator: flag ? const BoxDecoration() : null,
         labelColor: flag ? colorScheme.onSurface : null,
-        labelStyle:
-            TabBarTheme.of(context).labelStyle?.copyWith(fontSize: 13) ??
-            const TextStyle(fontSize: 13),
+        labelStyle: labelStyle,
+        unselectedLabelStyle: labelStyle,
         onTap: (value) {
           void animToTop() {
             if (onTap != null) {
@@ -1355,50 +1396,26 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           }
         },
         tabs: tabs.map((text) {
-          // ARM64 修改版（2026-09-16，2026-09-17 修）：
-          // 修「相关视频 / 评论 / 播放列表 三个标题上下高度/基线不一样」。
-          //
-          // 约束：只改**每个标题自己的文字布局**，绝不碰 Tab / TabBar 的高度，
-          // 也不改任何横向排布（labelPadding / isScrollable 保持上游原样）。
-          //
-          // 做法：用 `Align` 而不是「固定高度盒子 + Center」。
-          //   - `Align(alignment: center)` 在给定约束下会**撑满**可用宽高并把孩子
-          //     居中（shifted_box.dart: RenderPositionedBox，宽高因子都为 null 时
-          //     size = constraints.biggest）；
-          //   - 于是三个标题得到的是**完全相同的盒子尺寸**（Tab 给的那块），
-          //     再各自居中 → 基线必然一致，与文字内容、字体回退、混排都无关；
-          //   - 上一版把 label 高度写死成 20，遇到「播放列表」这类字体回退更高的
-          //     情况，盒子 20 反而**小于**文字行高，父级又只能放下 46，于是又歪了。
-          //     改成 Align 后不再依赖任何具体数值。
-          // 同时统一 `TextStyle(height: 1.0)`：把行高钉成字号本身，
-          // 消除「12.3万」这类数字+汉字混排可能带来的行高差。
-          const labelStyle = TextStyle(height: 1.0);
-
           if (text == '评论') {
+            // 计数会变 → 用 Obx 只包住 Text 本身，Tab 的形状与另外两个完全一致。
             return Tab(
               child: Align(
                 alignment: Alignment.center,
-                child: Obx(() {
-                  final count = _videoReplyController.count.value;
-                  return Text(
-                    '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
-                    softWrap: false,
-                    overflow: .visible,
-                    style: labelStyle,
-                  );
-                }),
+                child: Obx(
+                  () {
+                    final count = _videoReplyController.count.value;
+                    return buildLabel(
+                      '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
+                    );
+                  },
+                ),
               ),
             );
           }
           return Tab(
             child: Align(
               alignment: Alignment.center,
-              child: Text(
-                text,
-                softWrap: false,
-                overflow: .visible,
-                style: labelStyle,
-              ),
+              child: buildLabel(text),
             ),
           );
         }).toList(),

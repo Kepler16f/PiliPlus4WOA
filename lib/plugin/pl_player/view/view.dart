@@ -960,7 +960,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出窗口全屏' : '窗口全屏',
         icon: Icon(
           isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-          size: 20,
+          // 这两个图标（fullscreen / open_in_full）的字形几乎撑满整个 em 方框，
+          // 同样字号下比旁边跳集、弹幕那些图标显大。20 仍然偏大（用户反馈），
+          // 再降一档到 18，与「AI 翻译」等最小号图标一致。
+          size: 18,
           color: Colors.white,
         ),
         onTap: () => plPlayerController.triggerFullScreen(
@@ -976,7 +979,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出全屏' : '全屏',
         icon: Icon(
           isFullScreen ? Icons.close_fullscreen : Icons.open_in_full,
-          size: 20,
+          size: 18,
           color: Colors.white,
         ),
         onTap: () =>
@@ -1995,6 +1998,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         ],
 
         Obx(() {
+          // ARM64 修改版（2026-09-17）：自愈重开（isRecovering）时**不显示**这个
+          // 常规缓冲指示 —— 那段时间由 PlPlayerLoadingIndicator（「正在恢复播放…」）
+          // 独占画面。否则拖动进度条那套转圈会和自愈那套叠在一起（用户报的重叠）。
+          if (plPlayerController.isRecovering.value) {
+            return const SizedBox.shrink();
+          }
           if (plPlayerController.dataStatus.loading ||
               (plPlayerController.isBuffering.value &&
                   plPlayerController.playerStatus.isPlaying)) {
@@ -2145,6 +2154,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   static const int _freezeSamplesToJudge = 3;
   static const double _freezeSampleScale = 0.05;
 
+  /// 判定「画面冻结」需要连续几次像素完全相同。
+  ///
+  /// 倍速播放时降到 2 次（6s 而不是 9s，ARM64 修改版 2026-09-17）：
+  /// 用户报「三倍速播放长视频仍会卡死」，而每多等 3s 采样，在 3 倍速下就是
+  /// 9s 的视频内容被吞掉；恢复动作本身是「不动播放位置」的重建/重开，
+  /// 误判的代价只是白做一次重建，所以高倍速下值得更早出手。
+  int get _samplesToJudge =>
+      plPlayerController.playbackSpeed > 1.5 ? 2 : _freezeSamplesToJudge;
+
   void _startPictureFreezeSampler() {
     // 只在桌面端跑：这是 WOA 上 ANGLE 渲染路径特有的问题，移动端另有 PiP /
     // 后台等形态，没必要多背一份负载。
@@ -2162,7 +2180,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     // 等缓冲/走既有的断流重连，而不是去动播放位置。
     if (!plPlayerController.playerStatus.isPlaying ||
         plPlayerController.isSeeking.value ||
-        plPlayerController.isBuffering.value) {
+        plPlayerController.isBuffering.value ||
+        plPlayerController.isRecovering.value) {
       _unchangedFrameSamples = 0;
       return;
     }
@@ -2181,8 +2200,13 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           last.length == pixels.length &&
           listEquals(last, pixels)) {
         _unchangedFrameSamples++;
-        if (_unchangedFrameSamples >= _freezeSamplesToJudge) {
-          _unchangedFrameSamples = 0;
+        if (_unchangedFrameSamples >= _samplesToJudge) {
+          // 故意**不**把计数清零（ARM64 修改版，2026-09-17）：清零之后下次判定
+          // 又要重新攒够 _samplesToJudge 个采样（1 倍速 9s、3 倍速 6s），而这段
+          // 时间用户看的就是一张死图 —— 恢复失败的代价被采样周期放大了一倍。
+          // 保持计数后，画面仍然没变就每个采样周期（3s）再报一次，由
+          // PlPlayerController.onPictureFrozen 自己的冷却与升级阶梯负责节流。
+          // 画面一旦真的恢复，下一个采样就与上一帧不同 → 计数自然归零。
           plPlayerController.onPictureFrozen();
         }
       } else {

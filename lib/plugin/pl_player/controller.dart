@@ -180,6 +180,18 @@ class PlPlayerController with BlockConfigMixin {
 
   final RxBool isBuffering = true.obs;
 
+  /// 「自愈重开」专属的进行中标记（见 [_reloadAtCurrentPosition]）。
+  ///
+  /// 为什么要和 [isBuffering] 分开（2026-09-17 修）：
+  /// 画面区本来有两套加载指示 —— 常规缓冲指示（`PlVideoPlayer` 里那个
+  /// 「加载中… / 已缓冲时长」转圈）和自愈指示（`PlPlayerLoadingIndicator`）。
+  /// 两者都盯着 `isBuffering`，于是「拖动进度条 → 跳转要重新缓冲」与
+  /// 「看门狗自愈重开」这两件完全不同的事会**同时**点亮两个指示，屏幕上出现
+  /// 两个叠在一起的转圈（用户报的「两个动画重叠」）。
+  /// 现在自愈指示只认这个旗标、常规指示排除它，两者从构造上互斥：
+  /// 拖动进度条只会看到常规缓冲圈，自愈只会看到「正在恢复播放…」。
+  final RxBool isRecovering = false.obs;
+
   /// 全屏方向
   // ignore: unnecessary_getters_setters
   bool get isVertical => _isVertical;
@@ -977,26 +989,53 @@ class PlPlayerController with BlockConfigMixin {
   ///
   /// 这里统一处理：置缓冲态 → 重开 → 显式恢复播放（[play] 会清 `_userPaused`）
   /// → 等 `stream.playing` 真的变 true（最多 [_reloadWaitTimeout]）→ 清缓冲态。
+  ///
+  /// 全程置 [isRecovering]，让自愈加载指示与常规缓冲指示**互斥**（见该字段注释）。
   Future<void> _reloadAtCurrentPosition() async {
     if (dataSource is FileSource) return;
+    // 已经有一次重开在跑：叠加第二次只会互相把 open() 打断（表现为声音没了/画面没了）。
+    if (isRecovering.value) return;
     final ctr = _videoPlayerController;
     if (ctr == null || ctr.current.isEmpty) return;
     if (_videoController == null) return;
+    // 用户正在拖进度条：那是用户自己的操作，松手后由跳转流程接管，
+    // 这时候插一次重开会和拖动打架（也正是「自愈动画与拖动动画叠在一起」的来源之一）。
+    if (isSeeking.value) return;
 
+    isRecovering.value = true;
     isBuffering.value = true;
     _reloadWatchdog?.cancel();
     try {
-      await ctr.open(
-        ctr.current.last.copyWith(start: ctr.state.position),
-        play: true,
-      );
+      // open() 本身也套超时（2026-09-17 对抗验证补充）：如果 mpv 卡死，
+      // media_kit 的 open 链（stop(open:true) → loadfile）可能永不返回 ——
+      // 没有超时的话 finally 就永远不会执行，isRecovering/isBuffering 永久
+      // 停在 true，所有自愈路径（看门狗、onPictureFrozen、重入保护）全被禁用，
+      // 加载指示还会一直显示「正在恢复播放…」。超时后由 catch 清旗标，
+      // 交给既有的看门狗继续救；mpv 若事后才响应，播放恢复照常。
+      await ctr
+          .open(
+            ctr.current.last.copyWith(start: ctr.state.position),
+            play: true,
+          )
+          .timeout(_reloadWaitTimeout);
       // 显式再喊一次播放：
       //  - 兜住上面说的「open 内部留下 pause=true」；
       //  - _startPlayback 在全局回调被清空时也能落到本控制器的 play()。
       _startPlayback();
       // 等 playing 真的变 true。等不到就算了（超时后交给既有的
       // 断流/卡死看门狗继续救），无论如何都要把缓冲态清掉。
-      await ctr.stream.playing.firstWhere((e) => e).timeout(_reloadWaitTimeout);
+      //
+      // 先读当前状态再决定要不要等（2026-09-17 补）：
+      // `ctr.stream.playing` 是 broadcast stream，**不会**向新订阅者重放最近值，
+      // `firstWhere` 只等订阅之后的下一次事件。如果 `open(play: true)` 返回时播放
+      // 其实已经恢复（state.playing 已为 true），直接去等会白耗整段
+      // _reloadWaitTimeout（6s），自愈加载指示也要多挂 6s 才消失 —— 而
+      // isRecovering 正是这轮新加的指示，不能让它拖这么长。
+      if (!ctr.state.playing) {
+        await ctr.stream.playing
+            .firstWhere((e) => e)
+            .timeout(_reloadWaitTimeout);
+      }
     } catch (e) {
       // 超时或播放器已释放：记一条，别让缓冲态卡住。
       Utils.reportError(
@@ -1007,13 +1046,18 @@ class PlPlayerController with BlockConfigMixin {
       if (_playerCount != 0) {
         isBuffering.value = false;
       }
+      isRecovering.value = false;
       // 再补一次：`playing` 事件有时早于音频输出真正接上，
       // 形成「画面在走、声音没有」；这里延迟一点再喊一次播放，代价极低。
-      _reloadWatchdog = Timer(const Duration(milliseconds: 1200), () {
-        if (_playerCount == 0) return;
-        if (playerStatus.isPlaying) return;
-        _startPlayback();
-      });
+      // 已 dispose（_playerCount == 0）就不再挂这个定时器，免得 dispose 之后
+      // 又冒出一个 1200ms 的空转定时器。
+      if (_playerCount != 0) {
+        _reloadWatchdog = Timer(const Duration(milliseconds: 1200), () {
+          if (_playerCount == 0) return;
+          if (playerStatus.isPlaying) return;
+          _startPlayback();
+        });
+      }
     }
   }
 
@@ -1134,6 +1178,27 @@ class PlPlayerController with BlockConfigMixin {
   // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
   DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _stallCooldown = Duration(seconds: 6);
+
+  // ── 倍速因子（ARM64 修改版，2026-09-17）─────────────────────────────────
+  //
+  // 用户报「三倍速播放长视频仍然画面卡死、声音继续」。倍速与卡死正相关的原因
+  // 早就确认过：倍速由音频时钟驱动，3 倍速时 mpv 必须每秒呈现 3 倍的帧，而
+  // WOA 上这条渲染链（hwdec=d3d11va-copy 的 GPU→CPU 回拷 + ANGLE 重新上传 +
+  // glFinish）本来就吃紧 —— 负载成正比上升，卡死概率也随之上升。
+  //
+  // 所以下面几处判定/恢复的节流都按倍速缩放，而不是用固定值：
+  //   - 卡死恢复的冷却缩到一半（3 倍速下 6s 的冷却 = 用户眼里的 18s 视频时间）；
+  //   - 冻结判定的冷却与升级阶梯提前（见 onPictureFrozen）；
+  //   - 第一级「往回跳」的回退量按倍速放大（1 倍速下 2s 的缓冲，在 3 倍速下
+  //     只相当于 0.67s，实测不足以脱离「帧持续迟到」的区间）。
+  double get _speedFactor {
+    final s = playbackSpeed;
+    return (s.isFinite && s > 1.0) ? s : 1.0;
+  }
+
+  /// 当前生效的卡死恢复冷却。倍速播放时缩短，让恢复动作更快接上。
+  Duration get _stallCooldownNow =>
+      _speedFactor >= 2.0 ? const Duration(seconds: 3) : _stallCooldown;
   // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
   // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
   bool _userPaused = false;
@@ -1176,6 +1241,10 @@ class PlPlayerController with BlockConfigMixin {
   static const Duration _pictureResyncCooldown = Duration(seconds: 10);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
+  // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
+  // 每做一次就按倍数拉长下一次的冷却间隔 —— 否则在倍速播放下渲染链持续吃紧时，
+  // 会变成「刚重开完又冻结 → 又重开」的抖动，比卡住更难用。
+  int _pictureReloadCount = 0;
   // 上一次冻结时的 vo-drop，用来判断「像素不变」到底是真冻结（在丢帧）
   // 还是视频里本来就有静止画面（不丢帧 → 绝不能动播放位置）。
   int? _pictureFrozenDrops;
@@ -1248,23 +1317,42 @@ class PlPlayerController with BlockConfigMixin {
   ///     实机 20:06:38 那次就是这样（vo-drop 停在 40 不动，冻结持续数分钟）。
   ///  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 跳转重新对齐即可。
   ///
-  /// 恢复阶梯（每级 10s 冷却，长时间不再冻则计数归零），**必须保证能收敛**：
+  /// 恢复阶梯（每级有冷却，长时间不再冻则计数归零），**必须保证能收敛**：
   ///   1~2 级：重建视频输出表面/纹理（不动播放位置）
   ///   3   级：再叠一次「对齐到音频时钟的当前位置」（不是往回跳，音频不动，
   ///          所以即使误判也只是原地重跳，不丢进度）
-  ///   4 级起：`refreshPlayer()` 重建整条解码+渲染链，然后计数归零
+  ///   4 级起：`_reloadAtCurrentPosition()` 重建整条解码+渲染链，然后计数归零
   /// 之前这里 3 级以后会**永远**重复「重建表面 + 原地重跳」而从不升级，
   /// 遇到真正被钉死的状态就会无限空转 —— 这是本次修的缺陷。
+  ///
+  /// 倍速播放（ARM64 修改版，2026-09-17）：阶梯整体提前、冷却缩短。
+  /// 实测「3 倍速播长视频仍会冻结」，而原阶梯在 3 倍速下要走
+  /// 10s 冷却 × 4 级 ≈ 40s 才升到整链重建 —— 用户在这 40s 里看的是一张死图，
+  /// 3 倍速下又相当于 120s 的视频时间。现在 >1.5 倍速时第 2 次冻结就直接
+  /// 整链重建，冷却降到 4s（再乘重开次数的退避）。
   void onPictureFrozen() {
     if (_playerCount == 0) return;
+    // 已经在自愈重开中：这次「像素没变」正是重开导致的，不要叠加动作。
+    if (isRecovering.value) return;
     final now = DateTime.now();
+    // 用户刚拖完进度条：画面本来就要重新缓冲、位置也在重对齐，
+    // 这时插一次自愈重开会把用户拖到的位置冲掉（也会让两个加载指示叠在一起）。
+    if (now.difference(_lastUserSeekAt) < _userSeekGrace) return;
     final sinceLast = now.difference(_lastPictureResyncAt);
-    if (sinceLast < _pictureResyncCooldown) return;
+    // 冷却按倍速与已重开次数缩放：base（1x=10s / 1.5x 以上=6s / 2x 以上=4s）
+    // × (1 + 本段已整链重建次数)，上限 4 倍。
+    final baseCooldown = _speedFactor >= 2.0
+        ? 4
+        : (_speedFactor > 1.5 ? 6 : _pictureResyncCooldown.inSeconds);
+    final reloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
+    final cooldown = Duration(seconds: baseCooldown * (1 + reloads));
+    if (sinceLast < cooldown) return;
     _lastPictureResyncAt = now;
 
     // 距离上次很久 → 新的一次事故，重新计数。
     if (sinceLast > _stallEpisodeResetAfter) {
       _pictureFrozenCount = 0;
+      _pictureReloadCount = 0;
     }
     _pictureFrozenCount++;
 
@@ -1273,13 +1361,20 @@ class PlPlayerController with BlockConfigMixin {
     final dropsGrowing = prevDrops != null && drops > prevDrops;
     _pictureFrozenDrops = drops;
 
-    // 4 级起（或 B 类反复出现）：整条链重建，计数归零重新开始。
-    if (_pictureFrozenCount >= 4 || (dropsGrowing && _pictureFrozenCount > 2)) {
+    // 整链重建的门槛：倍速播放时前移（见方法头注释）。
+    final escalateAt = _speedFactor > 1.5 ? 2 : 4;
+    if (_pictureFrozenCount >= escalateAt || (dropsGrowing && _pictureFrozenCount > 2)) {
       _pictureFrozenCount = 0;
+      _pictureReloadCount++;
+      // next-cooldown 必须用自增后的 reloads（对抗验证抓到的 off-by-one）：
+      // 这次重开之后，下一次冻结的冷却间隔是按新计数算的。
+      final nextReloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
       Utils.reportError(
-        'picture frozen: escalating to refreshPlayer '
+        'picture frozen: escalating to reloadAtCurrentPosition '
         '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
         'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
+        'speed=${playbackSpeed}x reloads=$_pictureReloadCount '
+        'next-cooldown=${baseCooldown * (1 + nextReloads)}s '
         'time-pos=${positionInMilliseconds ~/ 1000}s)',
         null,
       );
@@ -1294,6 +1389,7 @@ class PlPlayerController with BlockConfigMixin {
       'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
       'core-idle=${_mpvProp('core-idle')} '
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
+      'speed=${playbackSpeed}x '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
       '-> ${_pictureFrozenCount <= 2 ? 'refresh video surface' : 'refresh surface + resync video pts'}',
@@ -1437,6 +1533,19 @@ class PlPlayerController with BlockConfigMixin {
           lifecycle == AppLifecycleState.detached;
       if (isSeeking.value || !_isCurrVideoPage || noVisibleView) {
         _resetStallWatchdogProgress();
+        return;
+      }
+      // ARM64 修改版（2026-09-17）：自愈重开（isRecovering）进行中时**只跳过判定、
+      // 不清零升级阶梯**。这是对抗验证抓到的收敛性缺陷：
+      //   - `_reloadAtCurrentPosition` 会把 isRecovering 一直置到重开结束
+      //     （open + 最多 6s 的 playing 确认），期间看门狗每 2s 跳过一次；
+      //   - 若把 isRecovering 和上面几项一起走 _resetStallWatchdogProgress()，
+      //     _stallRecoveryAttempts 会在重开失败（CDN URL 失效、6s 确认超时）时
+      //     被反复清零 → 阶梯永远卡在 1→2→重开→清零 的循环里，
+      //     升不到 3 级 refreshPlayUrl，且检测基线也被一起清掉。
+      //   所以这里单独 return，既不动阶梯、也不动检测基线；
+      //   重开结束后，下一 tick 从上次的状态继续判定。
+      if (isRecovering.value) {
         return;
       }
       final drops = _intProp('frame-drop-count');
@@ -1635,7 +1744,9 @@ class PlPlayerController with BlockConfigMixin {
   void _onVideoStalled(int drops, {required _StallKind kind}) {
     final now = DateTime.now();
     // 用自己的冷却，不共用网络重连的 _lastReconnectAt / _reconnectCooldown。
-    if (now.difference(_lastStallRecoverAt) < _stallCooldown) return;
+    // 冷却按倍速缩短（见 _stallCooldownNow）：3 倍速下 6s 的等待相当于
+    // 用户眼里的 18s 视频时间，太慢。
+    if (now.difference(_lastStallRecoverAt) < _stallCooldownNow) return;
     _lastStallRecoverAt = now;
     _stallRecoveryAttempts++;
 
@@ -1697,12 +1808,19 @@ class PlPlayerController with BlockConfigMixin {
     // 卡死恢复与断流重连是两条独立通道，各自的并发保护要分开。
     if (_stallRecoveryAttempts <= 1) {
       if (kind == _StallKind.dropping) {
-        // 丢帧型 / 输出停摆型 1 级：往回跳 2s 把视频 pts 重新对齐到音频，
+        // 丢帧型 / 输出停摆型 1 级：往回跳，把视频 pts 重新对齐到音频，
         // 终止「帧持续迟到被丢」的雪崩。这正是用户手动「往回拖进度条」做的事，
         // 不需要网络、代价最低。
-        // 用 2s 而不是 1s：2 倍速下音频时钟走得快一倍，1s 的回退量在 2x 时
-        // 只相当于 0.5s 的缓冲，实测不足以脱离迟到区（用户反馈倍速时更容易卡）。
-        final ms = positionInMilliseconds - 2000;
+        //
+        // 回退量按倍速放大（2s × speed，上限 8s）：
+        //   - 1 倍速时 2s 的缓冲，在 2 倍速下只相当于 1s、3 倍速下相当于 0.67s，
+        //     实测不足以脱离「帧持续迟到」的区间（用户反馈倍速时更容易卡）。
+        //   - 上限 8s：再大就不是「对齐」而是明显倒退进度了。
+        final rawBackOff = (2000 * _speedFactor).round();
+        final backOffMs = rawBackOff < 2000
+            ? 2000
+            : (rawBackOff > 8000 ? 8000 : rawBackOff);
+        final ms = positionInMilliseconds - backOffMs;
         seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
       } else {
         // 停滞型 / 起不来型 1 级：位置本来就没动，跳转没有意义 →
@@ -1712,8 +1830,11 @@ class PlPlayerController with BlockConfigMixin {
       return;
     }
     if (_stallRecoveryAttempts == 2) {
-      // 2 级：上一步没救回来 → 用当前 URL 从当前位置重开。
-      refreshPlayer();
+      // 2 级：上一步没救回来 → 重开当前 URL 从当前位置续播。
+      // 用 _reloadAtCurrentPosition 而不是 refreshPlayer：它把「重开 → 显式恢复
+      // 播放 → 等 playing 确认 → 清缓冲」这条链闭合，内部还会置 isRecovering
+      // 点亮自愈加载指示（见该方法的注释）。
+      unawaited(_reloadAtCurrentPosition());
       return;
     }
     // 3 级起：重新拉取播放链接（CDN URL 可能已失效）。
@@ -2103,8 +2224,19 @@ class PlPlayerController with BlockConfigMixin {
     }
     hasToasted = false;
     isSeeking.value = false;
+    // ARM64 修改版（2026-09-17）：记下「用户刚拖过进度条」的时刻。
+    // 拖动松手后播放器要重新缓冲、位置也要重新对齐，这段时间画面本来就可能不动；
+    // 冻结恢复如果这时插进来，就会和用户自己的拖动打架（自愈重开会把用户拖到的
+    // 位置冲掉），加载指示也会叠在一起。给一个宽限期（见 _userSeekGrace）。
+    _lastUserSeekAt = DateTime.now();
     hideTaskControls();
   }
+
+  /// 用户最近一次拖动进度条的时刻。
+  DateTime _lastUserSeekAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // 拖动松手后的宽限期：这段时间内不做画面冻结恢复。
+  // 8s 是「跳转 + 重新缓冲 + 音频重新对齐」在慢 CDN 下也需要的时间量级。
+  static const Duration _userSeekGrace = Duration(seconds: 8);
 
   final RxBool volumeIndicator = false.obs;
   Timer? volumeTimer;
@@ -2500,6 +2632,11 @@ class PlPlayerController with BlockConfigMixin {
     }
     _timer?.cancel();
     _cancelStallWatchdog();
+    // 自愈重开收尾定时器与进行中旗标一并清掉（对抗验证补充）：
+    // dispose 本身不等待 _reloadAtCurrentPosition 的 finally，若恰好在这里
+    // 被 dispose（_playerCount 归零），别让 isRecovering 残留。
+    _reloadWatchdog?.cancel();
+    isRecovering.value = false;
     // _position.close();
     // _playerEventSubs?.cancel();
     // _sliderPosition.close();

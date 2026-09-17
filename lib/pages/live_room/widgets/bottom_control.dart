@@ -200,15 +200,16 @@ class _BottomControlState extends State<BottomControl> with HeaderMixin {
               ComBtn(
                 height: 30,
                 tooltip: isFullScreen ? '退出全屏' : '全屏',
+                // 图标字形几乎撑满 em 方框，比同排按钮显大；与视频页统一降到 18。
                 icon: isFullScreen
                     ? const Icon(
                         Icons.fullscreen_exit,
-                        size: 24,
+                        size: 18,
                         color: Colors.white,
                       )
                     : const Icon(
                         Icons.fullscreen,
-                        size: 24,
+                        size: 18,
                         color: Colors.white,
                       ),
                 onTap: () =>
