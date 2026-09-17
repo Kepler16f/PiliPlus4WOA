@@ -2,6 +2,7 @@ import 'package:PiliPlus/common/widgets/progress_bar/audio_video_progress_bar.da
 import 'package:PiliPlus/common/widgets/progress_bar/segment_progress_bar.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/view/view.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
@@ -122,5 +123,58 @@ class BottomControl extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// ARM64 修改版：视频画面区的加载指示。
+///
+/// 为什么需要它：播放中途出现卡死时，恢复动作之一是「从当前位置重开」
+/// （`_reloadAtCurrentPosition`），重开必然要重新缓冲；而恢复的另一条路径是
+/// 「重建视频输出表面」。这两段时间里**声音和画面都会短暂停住、弹幕照常跑**，
+/// 用户完全看不出是在自愈，只觉得播放器又坏了。
+/// 这里把控制器的 `isBuffering` 直接映射成一个转圈 + 文案，让自愈过程可感知。
+///
+/// 只在**确实在播放**时显示：用户主动暂停不该弹加载圈
+/// （暂停时 `isBuffering` 也可能是 true，语义完全不同）。
+class PlPlayerLoadingIndicator extends StatelessWidget {
+  const PlPlayerLoadingIndicator({super.key, required this.controller});
+
+  final PlPlayerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final visible =
+          controller.isBuffering.value && controller.playerStatus.isPlaying;
+      if (!visible) {
+        return const SizedBox.shrink();
+      }
+      return const IgnorePointer(
+        child: ColoredBox(
+          // 压住画面：否则用户会盯着那张静止的旧帧，以为又卡死了。
+          color: Color(0x66000000),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              spacing: 10,
+              children: [
+                SizedBox(
+                  width: 30,
+                  height: 30,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    color: Colors.white,
+                  ),
+                ),
+                Text(
+                  '正在恢复播放…',
+                  style: TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    });
   }
 }

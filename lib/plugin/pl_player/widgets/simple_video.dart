@@ -104,7 +104,8 @@ class _PlSimpleVideoState extends State<PlSimpleVideo> {
         }
 
         final rect = ctr.rect.value;
-        final rectUsable = rect != null && rect.width > 1.0 && rect.height > 1.0;
+        final rectUsable =
+            rect != null && rect.width > 1.0 && rect.height > 1.0;
 
         final double width;
         final double height;
@@ -130,9 +131,8 @@ class _PlSimpleVideoState extends State<PlSimpleVideo> {
               debugPrint('PlSimpleVideo: rect=$rect, falling back');
             }
           }
-          final ratio = widget.aspectRatio ??
-              widget.sourceAspectRatio ??
-              (16 / 9);
+          final ratio =
+              widget.aspectRatio ?? widget.sourceAspectRatio ?? (16 / 9);
           final safeRatio = ratio.isFinite && ratio > 0 ? ratio : 16 / 9;
           height = _fallbackBaseHeight;
           width = height * safeRatio;

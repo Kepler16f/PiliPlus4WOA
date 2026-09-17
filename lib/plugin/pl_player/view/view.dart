@@ -960,7 +960,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出窗口全屏' : '窗口全屏',
         icon: Icon(
           isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-          size: 24,
+          size: 20,
           color: Colors.white,
         ),
         onTap: () => plPlayerController.triggerFullScreen(
@@ -976,7 +976,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出全屏' : '全屏',
         icon: Icon(
           isFullScreen ? Icons.close_fullscreen : Icons.open_in_full,
-          size: 24,
+          size: 20,
           color: Colors.white,
         ),
         onTap: () =>
@@ -1462,6 +1462,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
         if (widget.danmuWidget case final danmaku?)
           Positioned.fill(top: 4, child: danmaku),
+
+        // 自愈/重开时的加载指示（画在弹幕之上，确保看得见）
+        Positioned.fill(
+          child: PlPlayerLoadingIndicator(controller: plPlayerController),
+        ),
 
         if (!isLive)
           Positioned.fill(

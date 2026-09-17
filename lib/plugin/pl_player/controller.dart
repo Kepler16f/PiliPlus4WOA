@@ -1,4 +1,4 @@
-import 'dart:async' show StreamSubscription, Timer;
+import 'dart:async' show StreamSubscription, Timer, unawaited;
 import 'dart:convert' show ascii, utf8;
 import 'dart:io' show Platform;
 import 'dart:math' show max, min;
@@ -964,6 +964,59 @@ class PlPlayerController with BlockConfigMixin {
     );
   }
 
+  /// 重开当前 URL 从当前位置续播，并且**让播放真正跑起来、完成后自动收尾**。
+  ///
+  /// 为什么不能直接用 [refreshPlayer]（2026-09-17 修）：
+  ///   - 它只调 `ctr.open(..., play: true)` 就返回。而 media_kit 的 `open()` 内部
+  ///     会先 `await stop(open: true)` 并**把 pause 置回 true**，最后才按 `play`
+  ///     参数解除暂停、再设 playlist-pos。这个链路上任何一步的时序抖动，都会
+  ///     留下「画面在走、声音没了」或「声音在走、画面没了」这种半截状态 ——
+  ///     正是用户报的现象之一。
+  ///   - 它不需要用户手势，但重开确实要重新缓冲；用户看到的是一段静止画面，
+  ///     所以必须配一个加载指示。
+  ///
+  /// 这里统一处理：置缓冲态 → 重开 → 显式恢复播放（[play] 会清 `_userPaused`）
+  /// → 等 `stream.playing` 真的变 true（最多 [_reloadWaitTimeout]）→ 清缓冲态。
+  Future<void> _reloadAtCurrentPosition() async {
+    if (dataSource is FileSource) return;
+    final ctr = _videoPlayerController;
+    if (ctr == null || ctr.current.isEmpty) return;
+    if (_videoController == null) return;
+
+    isBuffering.value = true;
+    _reloadWatchdog?.cancel();
+    try {
+      await ctr.open(
+        ctr.current.last.copyWith(start: ctr.state.position),
+        play: true,
+      );
+      // 显式再喊一次播放：
+      //  - 兜住上面说的「open 内部留下 pause=true」；
+      //  - _startPlayback 在全局回调被清空时也能落到本控制器的 play()。
+      _startPlayback();
+      // 等 playing 真的变 true。等不到就算了（超时后交给既有的
+      // 断流/卡死看门狗继续救），无论如何都要把缓冲态清掉。
+      await ctr.stream.playing.firstWhere((e) => e).timeout(_reloadWaitTimeout);
+    } catch (e) {
+      // 超时或播放器已释放：记一条，别让缓冲态卡住。
+      Utils.reportError(
+        'reload at current position did not confirm playing: $e',
+        null,
+      );
+    } finally {
+      if (_playerCount != 0) {
+        isBuffering.value = false;
+      }
+      // 再补一次：`playing` 事件有时早于音频输出真正接上，
+      // 形成「画面在走、声音没有」；这里延迟一点再喊一次播放，代价极低。
+      _reloadWatchdog = Timer(const Duration(milliseconds: 1200), () {
+        if (_playerCount == 0) return;
+        if (playerStatus.isPlaying) return;
+        _startPlayback();
+      });
+    }
+  }
+
   Future<void>? refreshPlayer() {
     if (dataSource is FileSource) {
       return null;
@@ -1084,6 +1137,10 @@ class PlPlayerController with BlockConfigMixin {
   // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
   // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
   bool _userPaused = false;
+
+  // 自动重开的收尾定时器（见 _reloadAtCurrentPosition）。
+  Timer? _reloadWatchdog;
+  static const Duration _reloadWaitTimeout = Duration(seconds: 6);
 
   // ── 管线诊断（ARM64 修改版，2026-09-14）────────────────────────────────
   // 为什么需要它：上一轮用户报「最近一次画面卡住完全没有日志」。原因很直接 ——
@@ -1227,7 +1284,7 @@ class PlPlayerController with BlockConfigMixin {
         null,
       );
       _logPipelineSnapshot('picture-frozen');
-      refreshPlayer();
+      unawaited(_reloadAtCurrentPosition());
       return;
     }
 
@@ -1296,6 +1353,15 @@ class PlPlayerController with BlockConfigMixin {
       'track-count=${_mpvProp('track-list/count')} '
       // 播放状态与上下文
       'state=${playerStatus.value} buffering=${isBuffering.value} '
+      // 用户报过「声音没有正常恢复，画面继续播放」。
+      // 下面这组就是专治这个的判据：
+      //   audio-codec=null / aid=no  → 音频轨没了或没解码器
+      //   audio-pts 长时间不动         → 音频时钟停了（画面还在走）
+      //   last-audio-err              → ffmpeg 报的具体音频错误
+      'aid=${_mpvProp('aid')} audio-codec=${_mpvProp('audio-codec')} '
+      'audio-pts=${_mpvProp('audio-pts')} '
+      'audio-out-pts=${_mpvProp('audio-out-pts')} '
+      'last-audio-err=${_mpvProp('last-audio-err')} '
       'core-idle=${_mpvProp('core-idle')} '
       'paused-for-cache=${_mpvProp('paused-for-cache')} '
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
@@ -1432,7 +1498,8 @@ class PlPlayerController with BlockConfigMixin {
       if (playing &&
           !buffering &&
           (dropDelta > 0 || outputStalled) &&
-          now.difference(_lastPipelineSuspicionAt) > _pipelineSuspicionCooldown) {
+          now.difference(_lastPipelineSuspicionAt) >
+              _pipelineSuspicionCooldown) {
         _lastPipelineSuspicionAt = now;
         _logPipelineSnapshot('suspect');
       }
@@ -2408,6 +2475,7 @@ class PlPlayerController with BlockConfigMixin {
     resetScreenRotation();
     cancelLongPressTimer();
     _cancelSubForSeek();
+    _reloadWatchdog?.cancel();
     if (!_isCloseAll && _playerCount > 1) {
       _playerCount -= 1;
       _heartDuration = 0;

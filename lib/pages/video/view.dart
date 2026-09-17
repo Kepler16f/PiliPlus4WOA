@@ -1355,36 +1355,30 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           }
         },
         tabs: tabs.map((text) {
-          // ARM64 修改版（2026-09-16）：修「三个标题文字上下高度不一样」。
+          // ARM64 修改版（2026-09-16，2026-09-17 修）：
+          // 修「相关视频 / 评论 / 播放列表 三个标题上下高度/基线不一样」。
           //
-          // 关键约束：**只约束每个标题自己的高度，绝不碰 Tab / TabBar 的高度**，
-          // 也不改任何横向排布（labelPadding / isScrollable 一律保持上游原样）。
+          // 约束：只改**每个标题自己的文字布局**，绝不碰 Tab / TabBar 的高度，
+          // 也不改任何横向排布（labelPadding / isScrollable 保持上游原样）。
           //
-          // Tab.build 内部是
-          //   SizedBox(height: height ?? _kTabHeight, child: Center(widthFactor: 1.0, child: label))
-          // 即 Tab 会把 label 垂直居中放进自己的 46px 盒子里。所以只要三个 label 的
-          // **高度完全一致**，居中后的基线就必然一致。
-          //
-          // 「评论 12.3万」会调用 numFormat 生成「12.3万」这类混排（数字 + 汉字 +
-          // 小数点），可能落到不同的字体回退上，行高于是与「相关视频」「播放列表」
-          // 两个纯文本不同 → 居中的基线就偏了。
-          //
-          // 这里给每个 label 套一个固定高度的盒子把高度钉死：
-          //   - 高度写死 → 与字体回退、混排、Obx 重建全都无关；
-          //   - 不限制宽度 → label 仍按文字自然宽度，横向表现一字不改；
-          //   - 盒内再 Center → 因为盒子等高，基线也就齐了。
-          // 影响范围严格限于「标题自己那 20px」，Tab 与 TabBar 的高度、页签条的
-          // 45px、以及播放器都不受影响。
+          // 做法：用 `Align` 而不是「固定高度盒子 + Center」。
+          //   - `Align(alignment: center)` 在给定约束下会**撑满**可用宽高并把孩子
+          //     居中（shifted_box.dart: RenderPositionedBox，宽高因子都为 null 时
+          //     size = constraints.biggest）；
+          //   - 于是三个标题得到的是**完全相同的盒子尺寸**（Tab 给的那块），
+          //     再各自居中 → 基线必然一致，与文字内容、字体回退、混排都无关；
+          //   - 上一版把 label 高度写死成 20，遇到「播放列表」这类字体回退更高的
+          //     情况，盒子 20 反而**小于**文字行高，父级又只能放下 46，于是又歪了。
+          //     改成 Align 后不再依赖任何具体数值。
+          // 同时统一 `TextStyle(height: 1.0)`：把行高钉成字号本身，
+          // 消除「12.3万」这类数字+汉字混排可能带来的行高差。
           const labelStyle = TextStyle(height: 1.0);
-          Widget label(Widget child) => SizedBox(
-            height: 20,
-            child: Center(child: child),
-          );
 
           if (text == '评论') {
             return Tab(
-              child: label(
-                Obx(() {
+              child: Align(
+                alignment: Alignment.center,
+                child: Obx(() {
                   final count = _videoReplyController.count.value;
                   return Text(
                     '评论${count == -1 ? '' : ' ${NumUtils.numFormat(count)}'}',
@@ -1397,8 +1391,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             );
           }
           return Tab(
-            child: label(
-              Text(
+            child: Align(
+              alignment: Alignment.center,
+              child: Text(
                 text,
                 softWrap: false,
                 overflow: .visible,
