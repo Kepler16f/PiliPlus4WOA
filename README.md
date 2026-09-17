@@ -15,8 +15,6 @@
 
 ---
 
-以下为原项目readme
-
 <div align="center">
     <img width="200" height="200" src="assets/images/logo/logo.png">
 </div>
