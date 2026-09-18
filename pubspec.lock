@@ -808,7 +808,7 @@ packages:
     description:
       path: "."
       ref: dev
-      resolved-ref: "12c9d4d1517186390e92f86063369f4a26d01fdb"
+      resolved-ref: "3e65da893d9736135b2631a39e46c8f5388c2536"
       url: "https://github.com/bggRGjQaUbCoE/getx.git"
     source: git
     version: "4.7.2"
