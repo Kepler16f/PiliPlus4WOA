@@ -446,6 +446,20 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   }
 
   // Stop showing the refresh indicator.
+  //
+  // ARM64 修改版（2026-09-18）：收尾动画**不能**决定状态什么时候清空。
+  //
+  // 原因：下面两个 `animateTo(...)` 返回的 TickerFuture 只有在 ticker 真正在跑
+  // 的时候才会完成。而 ticker 会因为 TickerMode 被关掉而停摆 —— 播放器重建布局、
+  // 标签页被切走、窗口不可见等都会走到这条路。一旦 ticker 停摆，
+  //   `await _scaleController.animateTo(...)` 就**永远不会返回**，
+  // 于是紧跟其后的 `_status = null` 也永远不执行：_status 永久停在
+  // done / canceled，而 build 里是 `_status == null ? null : <指示器>` ——
+  // **刷新圈就卡在屏幕上不走了**，只有整个 State 重建（退出重进播放器）才会好。
+  // 这正是用户报的「评论区下拉刷新动画偶发卡住、重进播放器就恢复」。
+  //
+  // 修法：动画只当收尾效果，与一个略长于动画时长的延时**赛跑**，保证一定有出口。
+  // 视觉上没有任何变化（正常情况下动画先完成），但状态清空不再依赖 ticker。
   Future<void> _dismiss(RefreshIndicatorStatus newMode) async {
     await Future<void>.value();
     // This can only be called from _show() when refreshing and
@@ -455,25 +469,31 @@ class RefreshIndicatorState extends State<RefreshIndicator>
       newMode == RefreshIndicatorStatus.canceled ||
           newMode == RefreshIndicatorStatus.done,
     );
+    if (!mounted) return;
     setState(() {
       _status = newMode;
     });
-    switch (_status!) {
-      case RefreshIndicatorStatus.done:
-        await _scaleController.animateTo(
-          1.0,
-          duration: _kIndicatorScaleDuration,
-        );
-      case RefreshIndicatorStatus.canceled:
-        await _positionController.animateTo(
-          0.0,
-          duration: _kIndicatorScaleDuration,
-        );
-      case RefreshIndicatorStatus.drag:
-      case RefreshIndicatorStatus.refresh:
-      case RefreshIndicatorStatus.snap:
-        assert(false);
-    }
+    final TickerFuture animation = switch (_status!) {
+      RefreshIndicatorStatus.done => _scaleController.animateTo(
+        1.0,
+        duration: _kIndicatorScaleDuration,
+      ),
+      RefreshIndicatorStatus.canceled => _positionController.animateTo(
+        0.0,
+        duration: _kIndicatorScaleDuration,
+      ),
+      RefreshIndicatorStatus.drag ||
+      RefreshIndicatorStatus.refresh ||
+      RefreshIndicatorStatus.snap => throw StateError('unreachable'),
+    };
+    // 被取消（State dispose 等）时别让它变成未处理异常。
+    await Future.any([
+      animation.then((_) {}, onError: (_) {}),
+      // 超时留一点余量，正常情况下动画一定先完成。
+      Future<void>.delayed(
+        _kIndicatorScaleDuration + const Duration(milliseconds: 100),
+      ),
+    ]);
     if (mounted && _status == newMode) {
       _dragOffset = null;
       setState(() {

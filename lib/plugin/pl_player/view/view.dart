@@ -954,45 +954,61 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       /// 写法刻意与旁边的按钮保持一致（不加 Obx）：这个子树本来就会随
       /// isFullScreen 重建（页面上层有 Obx 依赖它，会以新的 maxWidth/maxHeight
       /// 重建 PLVideoPlayer），图标照样会翻转，少一层包装就少一个布局变量。
-      BottomControlType.windowFullscreen => ComBtn(
-        width: widgetWidth,
-        height: 30,
-        tooltip: isFullScreen ? '退出窗口全屏' : '窗口全屏',
-        icon: Icon(
-          isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-          // fullscreen 是四角括号，字形本身只占 em 方框的 2/3 左右，视觉上比
-          // 同字号的其他图标小。用户反馈 18 偏小，回到 20；旁边的「全屏」
-          // （open_in_full，字形几乎撑满方框）保持 18，两个按钮一视同仁反而
-          // 会让大的更大、小的更小。
-          size: 20,
-          color: Colors.white,
-        ),
-        onTap: () => plPlayerController.triggerFullScreen(
-          status: !isFullScreen,
-          inAppFullScreen: true,
-        ),
-      ),
+      /// ARM64 修改版（2026-09-18）：两个全屏按钮改为**各自独立**的状态。
+      ///
+      /// 原来两者都读同一个 isFullScreen，于是：
+      ///   - 窗口全屏时按「全屏」→ status=true 与 isFullScreen(true) 相等 →
+      ///     被提前 return，升不到原生全屏；
+      ///   - 原生全屏时按「窗口全屏」→ status=!isFullScreen=false → 直接退出全屏。
+      /// 现在各自看自己的形态（窗口全屏 / 原生全屏），可以互相切换。
+      /// 这也是这里必须包 Obx 的原因：窗口全屏 ↔ 原生全屏 切换时 isFullScreen
+      /// 一直是 true，外层不会重建，不订阅就拿不到新图标。
+      BottomControlType.windowFullscreen => Obx(() {
+        final isWindowFs = plPlayerController.isWindowFullScreen.value;
+        return ComBtn(
+          width: widgetWidth,
+          height: 30,
+          tooltip: isWindowFs ? '退出窗口全屏' : '窗口全屏',
+          icon: Icon(
+            isWindowFs ? Icons.fullscreen_exit : Icons.fullscreen,
+            // fullscreen 是四角括号，字形本身只占 em 方框的 2/3 左右，视觉上比
+            // 同字号的其他图标小。用户反馈 18 偏小，回到 20；旁边的「全屏」
+            // （open_in_full，字形几乎撑满方框）保持 18，两个按钮一视同仁反而
+            // 会让大的更大、小的更小。
+            size: 20,
+            color: Colors.white,
+          ),
+          onTap: () => plPlayerController.triggerFullScreen(
+            status: !isWindowFs,
+            inAppFullScreen: true,
+          ),
+        );
+      }),
 
       /// 全屏（无边框原生全屏，跳出当前窗口）
-      BottomControlType.fullscreen => ComBtn(
-        width: widgetWidth,
-        height: 30,
-        tooltip: isFullScreen ? '退出全屏' : '全屏',
-        icon: Icon(
-          isFullScreen ? Icons.close_fullscreen : Icons.open_in_full,
-          // open_in_full 字形几乎撑满 em 方框，18 已经不小（用户此前反馈 20 偏大）；
-          // 「窗口全屏」的四角括号字形小，另调到 20，两个按钮一视同仁反而
-          // 会让大的更大、小的更小。
-          size: 18,
-          color: Colors.white,
-        ),
-        onTap: () =>
-            plPlayerController.triggerFullScreen(status: !isFullScreen),
-        onSecondaryTap: () => plPlayerController.triggerFullScreen(
-          status: !isFullScreen,
-          inAppFullScreen: true,
-        ),
-      ),
+      BottomControlType.fullscreen => Obx(() {
+        final isNativeFs = plPlayerController.isNativeFullScreen;
+        return ComBtn(
+          width: widgetWidth,
+          height: 30,
+          tooltip: isNativeFs ? '退出全屏' : '全屏',
+          icon: Icon(
+            isNativeFs ? Icons.close_fullscreen : Icons.open_in_full,
+            // open_in_full 字形几乎撑满 em 方框，18 已经不小（用户此前反馈 20 偏大）；
+            // 「窗口全屏」的四角括号字形小，另调到 20，两个按钮一视同仁反而
+            // 会让大的更大、小的更小。
+            size: 18,
+            color: Colors.white,
+          ),
+          onTap: () => plPlayerController.triggerFullScreen(
+            status: !isNativeFs,
+          ),
+          onSecondaryTap: () => plPlayerController.triggerFullScreen(
+            status: !isNativeFs,
+            inAppFullScreen: true,
+          ),
+        );
+      }),
     };
 
     final isNotFileSource = !plPlayerController.isFileSource;

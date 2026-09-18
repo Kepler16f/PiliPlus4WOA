@@ -120,6 +120,16 @@ class PlPlayerController with BlockConfigMixin {
   final RxBool controlsLock = false.obs;
 
   final RxBool isFullScreen = false.obs;
+
+  /// 当前是「窗口全屏」（应用内铺满窗口）而非「原生全屏」（无边框跳出窗口）。
+  ///
+  /// ARM64 修改版（2026-09-18）：这两种全屏原本共用一个 [isFullScreen] 布尔，
+  /// 于是「窗口全屏 → 全屏」被 `isFullScreen.value == status` 提前 return 挡掉、
+  /// 「全屏 → 窗口全屏」又会直接退到普通窗口 —— 两个按钮被绑在一起。
+  /// 现在把形态拆出来单独记，两者可以互相切换：
+  ///   - [isFullScreen] 仍然表示「处于某种全屏」（页面布局只看它，语义不变）；
+  ///   - 本字段只在为真时才有意义，表示那种全屏是「窗口全屏」。
+  final RxBool isWindowFullScreen = false.obs;
   bool isLive = false;
 
   bool _isVertical = false;
@@ -1006,6 +1016,18 @@ class PlPlayerController with BlockConfigMixin {
     isBuffering.value = true;
     _reloadWatchdog?.cancel();
     try {
+      // 重开点**比当前位置往回一点**，不要正好停在当前位置（2026-09-18 按用户反馈改）。
+      //
+      // 为什么必须往回：卡死的本质是渲染链跟不上音频时钟、视频 pts 落在音频后面。
+      // 如果从「当前位置」重开，新管线一上来就顶在音频时钟上、甚至还在它后面 ——
+      // 一帧迟到就被丢，丢帧再让 pts 更落后，**刚刚重建完就立刻再次进入同一条
+      // 雪崩**（这也解释了为什么重建有时看起来「没救回来」）。
+      // 往回退一段等于给刚重建的管线一段缓冲，让它从从容的位置重新追上音频。
+      // 回退量按倍速放大（高倍速下音频时钟走得更快，同样的秒数只相当于更少的缓冲），
+      // 上限 8s：再大就不是「缓冲」而是明显倒退进度了。
+      final rawRewind = (3000 * _speedFactor).round();
+      final rewindMs = rawRewind < 3000 ? 3000 : (rawRewind > 8000 ? 8000 : rawRewind);
+      final startPos = ctr.state.position - Duration(milliseconds: rewindMs);
       // open() 本身也套超时（2026-09-17 对抗验证补充）：如果 mpv 卡死，
       // media_kit 的 open 链（stop(open:true) → loadfile）可能永不返回 ——
       // 没有超时的话 finally 就永远不会执行，isRecovering/isBuffering 永久
@@ -1014,7 +1036,9 @@ class PlPlayerController with BlockConfigMixin {
       // 交给既有的看门狗继续救；mpv 若事后才响应，播放恢复照常。
       await ctr
           .open(
-            ctr.current.last.copyWith(start: ctr.state.position),
+            ctr.current.last.copyWith(
+              start: startPos < Duration.zero ? Duration.zero : startPos,
+            ),
             play: true,
           )
           .timeout(_reloadWaitTimeout);
@@ -1177,7 +1201,7 @@ class PlPlayerController with BlockConfigMixin {
   // 一次网络重连会顺带把接下来 10s 的卡死恢复一起压掉（反之亦然），
   // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
   DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _stallCooldown = Duration(seconds: 6);
+  static const Duration _stallCooldown = Duration(seconds: 4);
 
   // ── 倍速因子（ARM64 修改版，2026-09-17）─────────────────────────────────
   //
@@ -1198,14 +1222,14 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 当前生效的卡死恢复冷却。倍速播放时缩短，让恢复动作更快接上。
   Duration get _stallCooldownNow =>
-      _speedFactor >= 2.0 ? const Duration(seconds: 3) : _stallCooldown;
+      _speedFactor >= 2.0 ? const Duration(seconds: 2) : _stallCooldown;
   // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
   // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
   bool _userPaused = false;
 
   // 自动重开的收尾定时器（见 _reloadAtCurrentPosition）。
   Timer? _reloadWatchdog;
-  static const Duration _reloadWaitTimeout = Duration(seconds: 6);
+  static const Duration _reloadWaitTimeout = Duration(seconds: 4);
 
   // ── 管线诊断（ARM64 修改版，2026-09-14）────────────────────────────────
   // 为什么需要它：上一轮用户报「最近一次画面卡住完全没有日志」。原因很直接 ——
@@ -1238,10 +1262,10 @@ class PlPlayerController with BlockConfigMixin {
   int? _appliedSurfaceHeight;
   // 「画面冻结」判定的状态（见 onPictureFrozen）。
   DateTime _lastPictureResyncAt = DateTime.fromMillisecondsSinceEpoch(0);
-  // 冻结判定的基础冷却（2026-09-18：10s → 6s）。用户反馈「卡死重建时间有点长」，
-  // 且像素采样已经提速到 ~4s 探测；冷却太长会让第一次重建和后续升级都拖慢。
-  // 倍速播放时还会在 onPictureFrozen 里再压短（≥2x 为 3s、>1.5x 为 4s）。
-  static const Duration _pictureResyncCooldown = Duration(seconds: 6);
+  // 冻结判定的基础冷却（2026-09-18：10s → 6s → 4s）。用户两次反馈「卡死重建
+  // 时间有点长」；像素采样已经把探测压到 ~4s，冷却再长就等于把感知时间又拉回去。
+  // 倍速播放时还会在 onPictureFrozen 里再压短（≥2x 为 2s、>1.5x 为 3s）。
+  static const Duration _pictureResyncCooldown = Duration(seconds: 4);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
   // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
@@ -1344,11 +1368,12 @@ class PlPlayerController with BlockConfigMixin {
     // 这时插一次自愈重开会把用户拖到的位置冲掉（也会让两个加载指示叠在一起）。
     if (now.difference(_lastUserSeekAt) < _userSeekGrace) return;
     final sinceLast = now.difference(_lastPictureResyncAt);
-    // 冷却按倍速与已重开次数缩放：base（1x=6s / 1.5x 以上=4s / 2x 以上=3s）
-    // × (1 + 本段已整链重建次数)，上限 4 倍。
+    // 冷却按倍速与已重开次数缩放：base（1x=4s / 1.5x 以上=3s / 2x 以上=2s）
+    // × (1 + 本段已整链重建次数)，上限 4 倍。下限不低于采样周期（2s），
+    // 否则会在同一个采样窗口里反复触发。
     final baseCooldown = _speedFactor >= 2.0
-        ? 3
-        : (_speedFactor > 1.5 ? 4 : _pictureResyncCooldown.inSeconds);
+        ? 2
+        : (_speedFactor > 1.5 ? 3 : _pictureResyncCooldown.inSeconds);
     final reloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
     final cooldown = Duration(seconds: baseCooldown * (1 + reloads));
     if (sinceLast < cooldown) return;
@@ -1366,10 +1391,10 @@ class PlPlayerController with BlockConfigMixin {
     final dropsGrowing = prevDrops != null && drops > prevDrops;
     _pictureFrozenDrops = drops;
 
-    // 整链重建的门槛：倍速播放时前移（见方法头注释）。
-    // 2026-09-18：1x 也从 4 降到 3 —— 用户在 1 倍速下同样觉得重建慢，
-    // 3 次（每次 6s 冷却）≈ 16s 内走到整链重建，比原来的 4 次 ≈ 40s 快得多。
-    final escalateAt = _speedFactor > 1.5 ? 2 : 3;
+    // 整链重建的门槛：倍速播放时前移。
+    // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建，
+    // 配合 4s 冷却，一次冻结大约 8s 内就能走到最重的那一级。
+    final escalateAt = _speedFactor > 1.5 ? 1 : 2;
     if (_pictureFrozenCount >= escalateAt || (dropsGrowing && _pictureFrozenCount > 2)) {
       _pictureFrozenCount = 0;
       _pictureReloadCount++;
@@ -2420,8 +2445,10 @@ class PlPlayerController with BlockConfigMixin {
     controls = !val;
   }
 
-  void _setFullScreen(bool val) {
+  void _setFullScreen(bool val, {bool inAppFullScreen = false}) {
     isFullScreen.value = val;
+    // 只在处于全屏时才有「是哪种全屏」可言；退出时一并归零。
+    isWindowFullScreen.value = val && inAppFullScreen;
     updateSubtitleStyle();
   }
 
@@ -2464,6 +2491,21 @@ class PlPlayerController with BlockConfigMixin {
 
   // 全屏
   bool _fsProcessing = false;
+
+  /// 当前生效的全屏形态。用来判断一次 [triggerFullScreen] 是否真是「切换」。
+  ///
+  /// ARM64 修改版（2026-09-18）：原来用 `isFullScreen.value == status` 判重，
+  /// 而两种全屏都让 isFullScreen 为真，于是
+  ///   - 窗口全屏时按「全屏」→ status=true == isFullScreen(true) → 直接 return，
+  ///     升不到原生全屏；
+  ///   - 原生全屏时按「窗口全屏」→ 它传的 status = !isFullScreen = false →
+  ///     直接退出全屏，回不到窗口全屏。
+  /// 现在按「形态」判重，两条路径都能走通。
+  /// 当前是否处于「原生全屏」（无边框跳出窗口），相对「窗口全屏」而言。
+  /// UI 上「全屏」按钮的图标/提示语看它；两种全屏可以互相切换。
+  bool get isNativeFullScreen =>
+      isFullScreen.value && !isWindowFullScreen.value;
+
   Future<void> triggerFullScreen({
     bool status = true,
     bool inAppFullScreen = false,
@@ -2471,7 +2513,14 @@ class PlPlayerController with BlockConfigMixin {
     bool isManualFS = true,
   }) async {
     if (isDesktopPip) return;
-    if (isFullScreen.value == status) return;
+    // 目标形态是否与当前一致 → 无需动作。
+    if (status) {
+      if (isFullScreen.value && isWindowFullScreen.value == inAppFullScreen) {
+        return;
+      }
+    } else if (!isFullScreen.value) {
+      return;
+    }
 
     if (_fsProcessing) return;
     _fsProcessing = true;
@@ -2485,7 +2534,16 @@ class PlPlayerController with BlockConfigMixin {
             orientation: orientation,
           );
         } else {
-          await enterDesktopFullScreen(inAppFullScreen: inAppFullScreen);
+          // 桌面端：窗口全屏 = 应用内铺满（不碰原生窗口，见 enterDesktopFullScreen
+          // 的 inAppFullScreen 分支）；原生全屏 = 无边框跳出窗口。
+          //
+          // 从原生全屏切到窗口全屏时**必须**先退掉原生全屏，否则窗口还是无边框
+          // 跳出的状态，「窗口全屏」就成了空操作。
+          if (inAppFullScreen) {
+            await exitDesktopFullScreen();
+          } else {
+            await enterDesktopFullScreen();
+          }
         }
       } else {
         if (PlatformUtils.isMobile) {
@@ -2497,11 +2555,12 @@ class PlPlayerController with BlockConfigMixin {
           }
           await resetScreenRotation();
         } else {
+          // 任何一种全屏退出时都要退掉原生全屏（窗口全屏时它是 no-op）。
           await exitDesktopFullScreen();
         }
       }
     } finally {
-      _setFullScreen(status);
+      _setFullScreen(status, inAppFullScreen: inAppFullScreen);
       _fsProcessing = false;
     }
   }
