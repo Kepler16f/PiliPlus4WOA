@@ -1238,7 +1238,10 @@ class PlPlayerController with BlockConfigMixin {
   int? _appliedSurfaceHeight;
   // 「画面冻结」判定的状态（见 onPictureFrozen）。
   DateTime _lastPictureResyncAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _pictureResyncCooldown = Duration(seconds: 10);
+  // 冻结判定的基础冷却（2026-09-18：10s → 6s）。用户反馈「卡死重建时间有点长」，
+  // 且像素采样已经提速到 ~4s 探测；冷却太长会让第一次重建和后续升级都拖慢。
+  // 倍速播放时还会在 onPictureFrozen 里再压短（≥2x 为 3s、>1.5x 为 4s）。
+  static const Duration _pictureResyncCooldown = Duration(seconds: 6);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
   // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
@@ -1318,10 +1321,10 @@ class PlPlayerController with BlockConfigMixin {
   ///  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 跳转重新对齐即可。
   ///
   /// 恢复阶梯（每级有冷却，长时间不再冻则计数归零），**必须保证能收敛**：
-  ///   1~2 级：重建视频输出表面/纹理（不动播放位置）
-  ///   3   级：再叠一次「对齐到音频时钟的当前位置」（不是往回跳，音频不动，
-  ///          所以即使误判也只是原地重跳，不丢进度）
-  ///   4 级起：`_reloadAtCurrentPosition()` 重建整条解码+渲染链，然后计数归零
+  ///   1 级：重建视频输出表面/纹理（不动播放位置）
+  ///   2 级：再叠一次「对齐到音频时钟的当前位置」（不是往回跳，音频不动，
+  ///         所以即使误判也只是原地重跳，不丢进度）
+  ///   3 级起：`_reloadAtCurrentPosition()` 重建整条解码+渲染链，然后计数归零
   /// 之前这里 3 级以后会**永远**重复「重建表面 + 原地重跳」而从不升级，
   /// 遇到真正被钉死的状态就会无限空转 —— 这是本次修的缺陷。
   ///
@@ -1329,7 +1332,9 @@ class PlPlayerController with BlockConfigMixin {
   /// 实测「3 倍速播长视频仍会冻结」，而原阶梯在 3 倍速下要走
   /// 10s 冷却 × 4 级 ≈ 40s 才升到整链重建 —— 用户在这 40s 里看的是一张死图，
   /// 3 倍速下又相当于 120s 的视频时间。现在 >1.5 倍速时第 2 次冻结就直接
-  /// 整链重建，冷却降到 4s（再乘重开次数的退避）。
+  /// 整链重建。
+  /// 2026-09-18 再次提速：采样探测 ~4s（见 view.dart 的采样器）、1x 冷却 10s→6s、
+  /// 1x 升级门槛 4→3，正常倍速下一次完整冻结到整链重建 ≈ 16s 内收敛。
   void onPictureFrozen() {
     if (_playerCount == 0) return;
     // 已经在自愈重开中：这次「像素没变」正是重开导致的，不要叠加动作。
@@ -1339,11 +1344,11 @@ class PlPlayerController with BlockConfigMixin {
     // 这时插一次自愈重开会把用户拖到的位置冲掉（也会让两个加载指示叠在一起）。
     if (now.difference(_lastUserSeekAt) < _userSeekGrace) return;
     final sinceLast = now.difference(_lastPictureResyncAt);
-    // 冷却按倍速与已重开次数缩放：base（1x=10s / 1.5x 以上=6s / 2x 以上=4s）
+    // 冷却按倍速与已重开次数缩放：base（1x=6s / 1.5x 以上=4s / 2x 以上=3s）
     // × (1 + 本段已整链重建次数)，上限 4 倍。
     final baseCooldown = _speedFactor >= 2.0
-        ? 4
-        : (_speedFactor > 1.5 ? 6 : _pictureResyncCooldown.inSeconds);
+        ? 3
+        : (_speedFactor > 1.5 ? 4 : _pictureResyncCooldown.inSeconds);
     final reloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
     final cooldown = Duration(seconds: baseCooldown * (1 + reloads));
     if (sinceLast < cooldown) return;
@@ -1362,7 +1367,9 @@ class PlPlayerController with BlockConfigMixin {
     _pictureFrozenDrops = drops;
 
     // 整链重建的门槛：倍速播放时前移（见方法头注释）。
-    final escalateAt = _speedFactor > 1.5 ? 2 : 4;
+    // 2026-09-18：1x 也从 4 降到 3 —— 用户在 1 倍速下同样觉得重建慢，
+    // 3 次（每次 6s 冷却）≈ 16s 内走到整链重建，比原来的 4 次 ≈ 40s 快得多。
+    final escalateAt = _speedFactor > 1.5 ? 2 : 3;
     if (_pictureFrozenCount >= escalateAt || (dropsGrowing && _pictureFrozenCount > 2)) {
       _pictureFrozenCount = 0;
       _pictureReloadCount++;
@@ -1392,7 +1399,7 @@ class PlPlayerController with BlockConfigMixin {
       'speed=${playbackSpeed}x '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
-      '-> ${_pictureFrozenCount <= 2 ? 'refresh video surface' : 'refresh surface + resync video pts'}',
+      '-> ${_pictureFrozenCount < 2 ? 'refresh video surface' : 'refresh surface + resync video pts'}',
       null,
     );
     _logPipelineSnapshot('picture-frozen');
@@ -1401,8 +1408,10 @@ class PlPlayerController with BlockConfigMixin {
     // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点。
     _applyVideoOutputSize(force: true);
 
-    if (_pictureFrozenCount > 2) {
-      // 重建表面连两次都没救回来 → 再叠一次「对齐到音频时钟当前位置」。
+    // 第 2 次（1x 下不会到 3 次就升级）再叠一次「对齐到音频时钟当前位置」：
+    // 对付 B 类（视频 pts 真在落后音频）比单纯重建表面更有针对性；
+    // 音频不动，所以即使误判也只是原地重跳，不丢进度。
+    if (_pictureFrozenCount >= 2) {
       seekTo(
         Duration(milliseconds: positionInMilliseconds),
         isSeek: false,

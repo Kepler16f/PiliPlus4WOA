@@ -960,10 +960,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出窗口全屏' : '窗口全屏',
         icon: Icon(
           isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-          // 这两个图标（fullscreen / open_in_full）的字形几乎撑满整个 em 方框，
-          // 同样字号下比旁边跳集、弹幕那些图标显大。20 仍然偏大（用户反馈），
-          // 再降一档到 18，与「AI 翻译」等最小号图标一致。
-          size: 18,
+          // fullscreen 是四角括号，字形本身只占 em 方框的 2/3 左右，视觉上比
+          // 同字号的其他图标小。用户反馈 18 偏小，回到 20；旁边的「全屏」
+          // （open_in_full，字形几乎撑满方框）保持 18，两个按钮一视同仁反而
+          // 会让大的更大、小的更小。
+          size: 20,
           color: Colors.white,
         ),
         onTap: () => plPlayerController.triggerFullScreen(
@@ -979,6 +980,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         tooltip: isFullScreen ? '退出全屏' : '全屏',
         icon: Icon(
           isFullScreen ? Icons.close_fullscreen : Icons.open_in_full,
+          // open_in_full 字形几乎撑满 em 方框，18 已经不小（用户此前反馈 20 偏大）；
+          // 「窗口全屏」的四角括号字形小，另调到 20，两个按钮一视同仁反而
+          // 会让大的更大、小的更小。
           size: 18,
           color: Colors.white,
         ),
@@ -2150,18 +2154,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   Timer? _freezeSampler;
   Uint8List? _lastFramePixels;
   int _unchangedFrameSamples = 0;
-  static const Duration _freezeSamplePeriod = Duration(seconds: 3);
-  static const int _freezeSamplesToJudge = 3;
+  // 采样周期与判定次数（ARM64 修改版，2026-09-18 再次提速）：
+  //   - 周期 3s → 2s，判定 3 次 → 2 次：1 倍速下探测从 ~9s 缩到 ~4s。
+  //   - 恢复动作本身是「不动播放位置」的重建/重开，误判的代价只是白做一次，
+  //     所以值得更早出手；用户反馈「卡死重建时间有点长」后进一步压短。
+  //   - 判定后不清零计数（见 _samplePicture 里的说明），画面仍冻则每 2s 再报，
+  //     由 PlPlayerController.onPictureFrozen 的冷却与升级阶梯负责节流。
+  static const Duration _freezeSamplePeriod = Duration(seconds: 2);
+  static const int _freezeSamplesToJudge = 2;
   static const double _freezeSampleScale = 0.05;
-
-  /// 判定「画面冻结」需要连续几次像素完全相同。
-  ///
-  /// 倍速播放时降到 2 次（6s 而不是 9s，ARM64 修改版 2026-09-17）：
-  /// 用户报「三倍速播放长视频仍会卡死」，而每多等 3s 采样，在 3 倍速下就是
-  /// 9s 的视频内容被吞掉；恢复动作本身是「不动播放位置」的重建/重开，
-  /// 误判的代价只是白做一次重建，所以高倍速下值得更早出手。
-  int get _samplesToJudge =>
-      plPlayerController.playbackSpeed > 1.5 ? 2 : _freezeSamplesToJudge;
 
   void _startPictureFreezeSampler() {
     // 只在桌面端跑：这是 WOA 上 ANGLE 渲染路径特有的问题，移动端另有 PiP /
@@ -2200,11 +2201,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           last.length == pixels.length &&
           listEquals(last, pixels)) {
         _unchangedFrameSamples++;
-        if (_unchangedFrameSamples >= _samplesToJudge) {
+        if (_unchangedFrameSamples >= _freezeSamplesToJudge) {
           // 故意**不**把计数清零（ARM64 修改版，2026-09-17）：清零之后下次判定
-          // 又要重新攒够 _samplesToJudge 个采样（1 倍速 9s、3 倍速 6s），而这段
-          // 时间用户看的就是一张死图 —— 恢复失败的代价被采样周期放大了一倍。
-          // 保持计数后，画面仍然没变就每个采样周期（3s）再报一次，由
+          // 又要重新攒够 _freezeSamplesToJudge 个采样（4s），而这段时间用户看
+          // 的就是一张死图 —— 恢复失败的代价被采样周期放大了一倍。
+          // 保持计数后，画面仍然没变就每个采样周期（2s）再报一次，由
           // PlPlayerController.onPictureFrozen 自己的冷却与升级阶梯负责节流。
           // 画面一旦真的恢复，下一个采样就与上一帧不同 → 计数自然归零。
           plPlayerController.onPictureFrozen();
