@@ -151,6 +151,9 @@ $RefreshIndicatorPatchMaterial = "lib/scripts/material/refresh_indicator.patch"
 
 $TabsPatchMaterial = "lib/scripts/material/tabs.patch"
 
+# WOA 修改版：本 fork 只构建 Windows，所以上游按平台追加的
+# bottom_sheet_android / bottom_sheet_ios_flutter_material 两个补丁不参与，
+# 数组与上游 Windows 分支保持一致。
 $patches_material = @($ModalBarrierPatchMaterial, $NavigationDrawerPatchMaterial, $PopupMenuPatchMaterial,
                     $FABPatchMaterial, $TextFieldPatchMaterial, $ScaffoldPatchMaterial, $RefreshIndicatorPatchMaterial,
                     $TabsPatchMaterial)
