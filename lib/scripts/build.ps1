@@ -7,10 +7,11 @@ try {
     # 都用「版本号 + 此后缀」。
     #
     # 为什么单独拆出来：pubspec.yaml 的 version 字段必须是合法 semver
-    # （只允许 [0-9A-Za-z-]，不含下划线），所以 2.1.2_fix2 这类带下划线的
-    # 编号写不进 pubspec。于是 pubspec 里仍写合法的 2.1.2+<build>，
-    # 对外（App 显示 / 安装包）用 2.1.2_fix3。发布下一个修复版时改这里即可。
-    $versionDisplaySuffix = '_fix3'
+    # （只允许 [0-9A-Za-z-]，不含下划线），所以带下划线的编号写不进 pubspec。
+    # 于是 pubspec 里仍写合法的 2.1.4+<build>，对外用「2.1.4 + 此后缀」。
+    # 现在跟随上游版本号，后缀留空（显示就是 2.1.4）；要区分本 fork 时
+    # 改成 '_woa1' 这类即可。
+    $versionDisplaySuffix = ''
 
     $versionName = $null
 

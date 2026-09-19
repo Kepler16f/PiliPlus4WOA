@@ -657,6 +657,9 @@ class PlPlayerController with BlockConfigMixin {
       _pictureFrozenDrops = null;
       _pictureFrozenCount = 0;
       _resetStallWatchdogProgress();
+      // 换片源 → 重新开始「音频停摆」判定的宽限期（见 _audioStallGraceUntil）：
+      // 新片源刚 open，AO 还没挂上、audio-pts 还是 null，不能当成停摆。
+      _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
       _aid = aid;
       _bvid = bvid;
       this.cid = cid;
@@ -1015,6 +1018,9 @@ class PlPlayerController with BlockConfigMixin {
     isRecovering.value = true;
     isBuffering.value = true;
     _reloadWatchdog?.cancel();
+    // 重开期间 AO 会被拆掉重建，`current-ao` / `audio-pts` 会短暂缺失 ——
+    // 重置宽限期，免得把「正在重建」判成「音频停摆」而再叠一次自愈。
+    _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
     try {
       // 重开点**比当前位置往回一点**，不要正好停在当前位置（2026-09-18 按用户反馈改）。
       //
@@ -1188,6 +1194,18 @@ class PlPlayerController with BlockConfigMixin {
   // 上一窗口的 time-pos（毫秒）。用于检测「本应播放但位置纹丝不动」
   // （例如打开后一直 paused / paused-for-cache、或播放器根本没起播）。
   int _stallWatchdogLastPosMs = -1;
+  // 上一窗口的 mpv `audio-pts`（字符串，mpv 直接给的就是这个）。
+  // 用于判「画面在走、声音没了」：音频时钟不再推进而画面照常 = 音频输出停摆。
+  // 用字符串原样比较即可，不用解析成数字 —— 只要「这一个窗口里它有没有变」。
+  String? _stallWatchdogLastAudioPts;
+  // 「音频停摆」判定的宽限期截止时刻。
+  //
+  // 起播/重开后的一小段时间里，mpv 还没把 AO 挂上、audio-pts 还是 null，
+  // 「AO 缺失 / 音轨读不到」的判据会**天然成立** —— 不加这段宽限，
+  // 每次起播都会被当成音频停摆并触发一次自愈。
+  // 由 setDataSource / _reloadAtCurrentPosition 重置为「现在 + _audioStallGrace」。
+  DateTime _audioStallGraceUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _audioStallGrace = Duration(seconds: 8);
   // 本次卡死开始时的累计丢帧数（只用于日志里给出「本段丢了多少帧」）。
   int? _stallEpisodeDrops;
   // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
@@ -1484,14 +1502,18 @@ class PlPlayerController with BlockConfigMixin {
       // 播放状态与上下文
       'state=${playerStatus.value} buffering=${isBuffering.value} '
       // 用户报过「声音没有正常恢复，画面继续播放」。
-      // 下面这组就是专治这个的判据：
-      //   audio-codec=null / aid=no  → 音频轨没了或没解码器
-      //   audio-pts 长时间不动         → 音频时钟停了（画面还在走）
-      //   last-audio-err              → ffmpeg 报的具体音频错误
-      'aid=${_mpvProp('aid')} audio-codec=${_mpvProp('audio-codec')} '
-      'audio-pts=${_mpvProp('audio-pts')} '
-      'audio-out-pts=${_mpvProp('audio-out-pts')} '
-      'last-audio-err=${_mpvProp('last-audio-err')} '
+      // 下面这组就是专治这个的判据（2026-09-19 起还接了自愈，见 _StallKind.audioStalled）：
+      //   aid=no            → 当前选中的音频轨不存在
+      //   audio-pts 不动     → 音频时钟停了（画面还在走）
+      //   ao=no/null        → mpv 没挂上音频输出
+      'aid=${_mpvProp('aid')} audio-pts=${_mpvProp('audio-pts')} '
+      // 只记**存在**的属性：`audio-out-pts` / `last-audio-err` 在 mpv 0.41 的
+      // 属性表里根本没有（前者实测一直是 null），记它们只会污染日志 ——
+      // 与当年 `video-pts` 是同一个坑。改用有据可查的 current-ao / audio-device
+      // / audio-params：它们能回答「AO 还在不在、用的是哪个设备、格式对不对」。
+      'ao=${_mpvProp('current-ao')} '
+      'audio-device=${_mpvProp('audio-device')} '
+      'audio-params=${_mpvProp('audio-params')} '
       'core-idle=${_mpvProp('core-idle')} '
       'paused-for-cache=${_mpvProp('paused-for-cache')} '
       'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
@@ -1528,6 +1550,61 @@ class PlPlayerController with BlockConfigMixin {
   int? _intProp(String name) {
     final raw = _mpvProp(name);
     return raw == null ? null : int.tryParse(raw);
+  }
+
+  /// 当前片源**是否有音轨**（而不是「音频轨此刻是否可用」）。
+  ///
+  /// 用 mpv 的 `track-list` 判断：只要存在 type=audio 的轨道就返回 true。
+  /// 为什么要单独判它 —— `aid` 属性在「当前选中的音频轨不存在」时返回 `no`，
+  /// 而**片源本身没有音轨**（纯静音视频）时同样恒为 `no`。两者在 aid 上长得
+  /// 一模一样，但含义完全相反：前者要自愈，后者（静音视频）绝不能碰。
+  /// `track-list` 才能区分它们。
+  ///
+  /// 读不到 track-list、或它的字符串形态里根本没有 `type=` 字段时返回 true：
+  /// 宁可让判据保留，也不因为读不到属性而把一整类问题静默压掉
+  /// —— 与 core-idle 用 `!= yes` 同一个取向。
+  bool _hasAudioTrack() {
+    final list = _mpvProp('track-list');
+    if (list == null || !list.contains('type=')) return true;
+    return list.contains('type=audio');
+  }
+
+  /// 给 mpv 发一条命令（自愈用）。失败/播放器已释放时静默忽略。
+  ///
+  /// 与 [setProperty] 的分工：这里只用于**命令**（如 `audio-reload`），
+  /// 属性读写走 `_mpvProp` / [setProperty]。
+  void _mpvCommand(List<String> args) {
+    final player = _videoPlayerController;
+    if (player is! NativePlayer) return;
+    try {
+      unawaited(player.command(args));
+    } catch (_) {
+      // 播放器已释放等
+    }
+  }
+
+  /// 音频输出停摆时的最轻恢复：让 mpv 重建音频输出（AO）。
+  ///
+  /// 2026-09-19：对应「画面继续播放、声音没了」。
+  ///   - `audio-reload`：重载音频轨（实现上是卸载再重新加入），会把解码器与
+  ///     AO 一起重建（见 mpv input.rst 的 `audio-reload`，语义同 `sub-reload`）；
+  ///   - 再把 `audio-device` 写回当前值：手册（input.rst）明确写「写入该属性会
+  ///     把音频输出**调度为重载**」，是让 AO 重新初始化的官方途径。
+  ///     注意它「在 AO 未激活时不会自动启用音频」—— 所以两者都发，
+  ///     单靠后者救不了「AO 根本没挂上」的情况。
+  ///
+  /// 两者都**完全不动播放位置**，所以误判的代价只是一次无声的 AO 重建。
+  void _reloadAudioOutput() {
+    final device = _mpvProp('audio-device');
+    _mpvCommand(const ['audio-reload']);
+    if (device != null && device.isNotEmpty && device != 'auto') {
+      final player = _videoPlayerController;
+      if (player is NativePlayer) {
+        try {
+          player.setProperty('audio-device', device);
+        } catch (_) {}
+      }
+    }
   }
 
   // 启动/维持画面卡死看门狗。幂等：已有实例则复用。
@@ -1604,6 +1681,22 @@ class PlPlayerController with BlockConfigMixin {
       _stallWatchdogLastPosMs = pos;
       final dropDelta = drops - last;
 
+      // 音频侧：用于判 E（画面在走、声音没了）。与下面那些视频判据共用同一次采样。
+      final audioPts = _mpvProp('audio-pts');
+      final ao = _mpvProp('current-ao');
+      final audioPosFrozen = audioPts != null &&
+          _stallWatchdogLastAudioPts != null &&
+          audioPts == _stallWatchdogLastAudioPts;
+      _stallWatchdogLastAudioPts = audioPts;
+      // 音频输出去哪了。只认 mpv 明确给出的字面量：手册（input.rst）记
+      // `aid` 在「找不到该轨道」时返回字面量 `no`，`current-ao` 同族。
+      // **不把「读不到（null）」算成缺失** —— 读不到是属性不可用，属于
+      // 「没有证据」，不能当成「有问题的证据」（与 core-idle 用 `!= yes`
+      // 同一个取向：宁可漏判，不可误判）。
+      final aoMissing = ao == 'no' || ao == 'null';
+      final aid = _mpvProp('aid');
+      final audioTrackMissing = aid == 'no';
+
       // 帧率类指标：管线各段的产出速率。
       final vfFps = double.tryParse(_mpvProp('estimated-vf-fps') ?? '');
       final containerFps = double.tryParse(_mpvProp('container-fps') ?? '');
@@ -1636,11 +1729,47 @@ class PlPlayerController with BlockConfigMixin {
       final frozenPlaying = playing && !buffering && posFrozen;
       final notPlayingStuck = !playing && !_userPaused && _autoPlay;
 
+      // E. 在播 + 画面照常推进，但**音频输出停摆**（2026-09-19 新增，用户报的
+      //    「视频画面继续播放而声音不动」）。
+      //
+      //    这是前四种形态的镜像，四条判据全都要求「画面出问题」，所以这种一次都
+      //    判不出来。判据必须**只依赖音频侧**，且不能碰 time-pos ——
+      //    time-pos 在 video-sync=audio 下由音频时钟驱动，音频一停它也就停了，
+      //    但用户看到的是「画面还在走」，所以真正能区分的是：
+      //      (a) 音频时钟自己不动了：连续两个采样窗口 audio-pts 完全相同；
+      //      (b) 更硬的证据：mpv 根本没挂上 AO（current-ao 为 null/no），
+      //          或者选中的音频轨不存在了（aid=no）。
+      //
+      //    ⚠️ 两个必须有的护栏，否则会误判：
+      //      1) `_hasAudioTrack()`：**片源本身没有音轨**（纯静音视频）时
+      //         aid 恒为 no、AO 也不会挂，条件 (b) 永远成立 —— 不加这条就会
+      //         对静音视频无限触发自愈，还会一路升级到整链重建。
+      //         只有「轨道存在却没在出声」才算异常。
+      //      2) `_audioStallGraceUntil`：起播/重开后 mpv 还没把 AO 挂上、
+      //         audio-pts 还是 null 的那几秒同样满足 (b)。给一段宽限期，
+      //         避免把「还没起来」当成「停摆了」。
+      //
+      //    也不在 buffering 里判：缓冲时音频本来就停着，那是正常的。
+      //
+      //    ⚠️ 还必须要求 `!posFrozen`（画面在推进）。两个理由：
+      //      1) 这才是用户报的形状 ——「画面继续播放而声音不动」；
+      //      2) 在 video-sync=audio 下 time-pos 由音频时钟驱动，音频真停了
+      //         time-pos 多半也停 → 那种情况应该走 frozenPlaying 那条线
+      //         （它的阶梯最后会整链重建，音频自然一起重建），不该被这里抢走，
+      //         否则会把一次「渲染链停摆」误诊成「AO 问题」而白费一级。
+      final audioStalled = playing &&
+          !buffering &&
+          !posFrozen &&
+          !onlyPlayAudio.value &&
+          !now.isBefore(_audioStallGraceUntil) &&
+          _hasAudioTrack() &&
+          (aoMissing || audioTrackMissing || audioPosFrozen);
+
       // 证据优先：还没到判定阈值、或判据没覆盖到，只要指标有异常迹象，
       // 也按 20s 节流记一条快照。用户感知到的卡死必须在日志里留下痕迹。
       if (playing &&
           !buffering &&
-          (dropDelta > 0 || outputStalled) &&
+          (dropDelta > 0 || outputStalled || audioStalled) &&
           now.difference(_lastPipelineSuspicionAt) >
               _pipelineSuspicionCooldown) {
         _lastPipelineSuspicionAt = now;
@@ -1660,7 +1789,8 @@ class PlPlayerController with BlockConfigMixin {
       //      由音频时钟或消费端驱动，画面停了它们照旧/不更新）；
       //   3) 误判的代价是可见的：无故往回跳。
       // 所以 `avsync` 只进日志，不参与判定（见 _logPipelineSnapshot / stall 日志）。
-      final bad = dropping || outputStalled || frozenPlaying || notPlayingStuck;
+      final bad =
+          dropping || outputStalled || frozenPlaying || notPlayingStuck || audioStalled;
       _stallWindowHistory.add(bad);
       while (_stallWindowHistory.length > _stallWindowHistorySize) {
         _stallWindowHistory.removeAt(0);
@@ -1686,8 +1816,11 @@ class PlPlayerController with BlockConfigMixin {
         _onVideoStalled(
           drops,
           // D（输出链停摆）同样靠「跳转重新对齐」恢复，归到 dropping 一档。
+          // E（音频停摆）走自己的分支（见 _onVideoStalled）。
           kind: notPlayingStuck
               ? _StallKind.notPlaying
+              : audioStalled && !(dropping || outputStalled)
+              ? _StallKind.audioStalled
               : (dropping || outputStalled)
               ? _StallKind.dropping
               : _StallKind.frozen,
@@ -1750,6 +1883,7 @@ class PlPlayerController with BlockConfigMixin {
     _stallWindowHistory.clear();
     _stallWatchdogLastDrops = null;
     _stallWatchdogLastPosMs = -1;
+    _stallWatchdogLastAudioPts = null;
     _stallEpisodeDrops = null;
     _videoStalled = false;
     _stallRecoveryAttempts = 0;
@@ -1769,6 +1903,9 @@ class PlPlayerController with BlockConfigMixin {
   //     1 级：再显式 play() 一次，很多情况下只是播放在某处被暂停了。
   //   notPlaying（本该播放却没在播，新症状：打开视频根本起不来）
   //     1 级：同上，先把播放状态拉起来（位置本来就没动，跳转没有意义）。
+  //   audioStalled（画面在走、声音没了，2026-09-19 新增）
+  //     1 级：重建音频输出（_reloadAudioOutput）—— 不动播放位置，
+  //           这一档的病根在 AO/音频解码器，跳转与重开都治不到。
   // 之后各级相同：
   //   2 级：重开当前 URL 从当前位置续播（refreshPlayer，不重新拉链接）。
   //   3 级起：让视频页重新拉取播放链接（refreshPlayUrl，最重、依赖网络）。
@@ -1856,6 +1993,11 @@ class PlPlayerController with BlockConfigMixin {
             : (rawBackOff > 8000 ? 8000 : rawBackOff);
         final ms = positionInMilliseconds - backOffMs;
         seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
+      } else if (kind == _StallKind.audioStalled) {
+        // 音频停摆型 1 级：重建音频输出。病根在 AO / 音频解码器，
+        // 跳转（dropping 的做法）与显式 play（frozen/notPlaying 的做法）都治不到，
+        // 而重建 AO 完全不动播放位置，误判代价最低。
+        _reloadAudioOutput();
       } else {
         // 停滞型 / 起不来型 1 级：位置本来就没动，跳转没有意义 →
         // 先把播放跑起来（走 _startPlayback，回调缺失时也能兜底）。
@@ -2888,4 +3030,12 @@ enum _StallKind {
 
   /// 本该播放却没有在播（打开视频后一直起不来）。
   notPlaying,
+
+  /// 正在播放、画面照常推进，但**音频输出停摆**（声音没了）。
+  ///
+  /// 2026-09-19 新增。这是上面三种形态的镜像：整个看门狗原本都是围绕
+  /// 「画面冻结、声音继续」建的，四条判据（dropping / outputStalled /
+  /// frozenPlaying / notPlayingStuck）**全部要求画面出问题**，所以
+  /// 「画面在走、声音没了」一次都判不出来，也就完全没有自愈 —— 用户报的正是这个。
+  audioStalled,
 }
