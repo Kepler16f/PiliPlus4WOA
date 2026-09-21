@@ -105,8 +105,9 @@ abstract final class Pref {
 
   static List<double> get springDescription => List<double>.from(
     _setting.get(SettingBoxKey.springDescription) ??
-        // duration: 0.3, bounce: 0.0
-        const [1.0, 438.64908449286037, 41.88790204786391],
+        // duration: 0.3, bounce: 0.2 (damping ratio 0.8, slight overshoot for
+        // a snappy settle; 1.0 was critically damped and felt sluggish)
+        const [1.0, 438.64908449286037, 33.51032163829113],
   );
   //   [0.5, 100.0, 2.2 * math.sqrt(50)], // [mass, stiffness, damping]
 
