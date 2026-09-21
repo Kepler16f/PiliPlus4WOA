@@ -509,26 +509,41 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     final Completer<void> completer = Completer<void>();
     _pendingRefreshFuture = completer.future;
     _status = RefreshIndicatorStatus.snap;
-    _positionController
-        .animateTo(
-          1.0 / _kDragSizeFactorLimit,
-          duration: _kIndicatorSnapDuration,
-        )
-        .whenComplete(() {
-          if (mounted && _status == RefreshIndicatorStatus.snap) {
-            setState(() {
-              // Show the indeterminate progress indicator.
-              _status = RefreshIndicatorStatus.refresh;
-            });
+    // ARM64 修改版（2026-09-20）：快照动画与「进入 refresh 状态、调用
+    // onRefresh」之间不能有依赖关系。
+    //
+    // 原来把两者串在 `_positionController.animateTo(...).whenComplete(...)` 里：
+    // animateTo 的 TickerFuture 只在 ticker 运行时才完成，而 ticker 会被静音
+    // （标签页被滑走、窗口不可见、页面进 Offstage）。ticker 一停，whenComplete
+    // 永不执行 → `_status` 永久停在 snap（刷新圈定在顶部、甚至 onRefresh 都
+    // 没开始跑），只有整个 State 重建（退出重进播放器）才恢复 —— 这正是
+    // 用户报的「评论区下拉刷新动画偶发卡住、重进播放器就好」。
+    //
+    // 修法与 _dismiss 同一套：快照动画照常跑，但用与动画赛跑的延时保证
+    // **一定**会进入 refresh 并调用 onRefresh。视觉效果不变（正常情况下
+    // 动画先完成），状态机不再依赖 ticker 是否能跑。
+    final TickerFuture snap = _positionController.animateTo(
+      1.0 / _kDragSizeFactorLimit,
+      duration: _kIndicatorSnapDuration,
+    );
+    Future.any([
+      snap.then((_) {}, onError: (_) {}),
+      Future<void>.delayed(_kIndicatorSnapDuration),
+    ]).then((_) {
+      if (mounted && _status == RefreshIndicatorStatus.snap) {
+        setState(() {
+          // Show the indeterminate progress indicator.
+          _status = RefreshIndicatorStatus.refresh;
+        });
 
-            widget.onRefresh().whenComplete(() {
-              if (mounted && _status == RefreshIndicatorStatus.refresh) {
-                completer.complete();
-                _dismiss(RefreshIndicatorStatus.done);
-              }
-            });
+        widget.onRefresh().whenComplete(() {
+          if (mounted && _status == RefreshIndicatorStatus.refresh) {
+            completer.complete();
+            _dismiss(RefreshIndicatorStatus.done);
           }
         });
+      }
+    });
   }
 
   /// Show the refresh indicator and run the refresh callback as if it had
