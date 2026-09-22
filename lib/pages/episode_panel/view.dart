@@ -655,12 +655,13 @@ class _EpisodePanelState extends State<EpisodePanel>
     ),
     child: Row(
       children: [
+        // 订阅合集按钮固定在工具栏最左边
+        if (_favState != null) Obx(() => _buildFavBtn(_favState!.value)),
         if (showTitle)
           Text(
             widget.type.title,
             style: theme.textTheme.titleMedium,
           ),
-        if (_favState != null) Obx(() => _buildFavBtn(_favState!.value)),
         iconButton(
           iconSize: 22,
           tooltip: '跳至顶部',
