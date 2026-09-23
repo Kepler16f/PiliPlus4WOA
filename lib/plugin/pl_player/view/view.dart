@@ -1077,6 +1077,28 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     }
   }
 
+  // PiP 窗口拖动：windowManager.startDragging() 底层是 WM_SYSCOMMAND SC_MOVE，
+  // 系统移动循环只消费鼠标消息；Flutter 引擎在 Windows 上把触摸走 WM_POINTER
+  // 路径（不合成鼠标消息），所以触控拖不动窗口、鼠标可以。
+  // 改用手势增量 setPosition，鼠标/触摸统一。注意不能用 globalPosition 差值
+  // （桌面端它是相对客户区的坐标，窗口一动就跳），必须累积 details.delta。
+  Offset? _pipDragPos;
+
+  void _onPipDragStart(DragStartDetails details) {
+    windowManager.getPosition().then((pos) => _pipDragPos = pos);
+  }
+
+  void _onPipDragUpdate(DragUpdateDetails details) {
+    final pos = _pipDragPos;
+    if (pos == null) return;
+    _pipDragPos = pos + details.delta;
+    windowManager.setPosition(_pipDragPos!);
+  }
+
+  void _onPipDragEnd(DragEndDetails details) {
+    _pipDragPos = null;
+  }
+
   void _onPanStart(ScaleStartDetails details) {
     _gestureType = null;
     _initialFocalPoint = details.localFocalPoint;
@@ -1742,7 +1764,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                       child: plPlayerController.isDesktopPip
                           ? GestureDetector(
                               behavior: HitTestBehavior.translucent,
-                              onPanStart: (_) => windowManager.startDragging(),
+                              onPanStart: _onPipDragStart,
+                              onPanUpdate: _onPipDragUpdate,
+                              onPanEnd: _onPipDragEnd,
                               child: widget.headerControl,
                             )
                           : widget.headerControl,
