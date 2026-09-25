@@ -221,7 +221,7 @@ class PlPlayerController with BlockConfigMixin {
       (Platform.isAndroid && AndroidHelper.isPipMode) ||
       (PlatformUtils.isDesktop && isDesktopPip);
   late bool isDesktopPip = false;
-  late Rect _lastWindowBounds;
+  Rect? _lastWindowBounds;
 
   late final showWindowTitleBar = Pref.showWindowTitleBar;
   late final RxBool isAlwaysOnTop = false.obs;
@@ -230,21 +230,32 @@ class PlPlayerController with BlockConfigMixin {
     return windowManager.setAlwaysOnTop(value);
   }
 
-  Future<void> exitDesktopPip() {
+  Future<void> exitDesktopPip() async {
+    final bounds = _lastWindowBounds;
+    // 诊断：确认按钮点击是否真的走到了这里、以及窗口恢复参数是否有效。
+    // （用户报过「退出画中画按钮点击没反应」——若日志无此行，问题在点击层面；
+    //   有此行但窗口没恢复，问题在这个函数里。）
+    Utils.reportError('pip: exitDesktopPip bounds=$bounds', null);
     isDesktopPip = false;
-    return Future.wait([
-      if (showWindowTitleBar)
-        windowManager.setTitleBarStyle(TitleBarStyle.normal),
-      windowManager.setMinimumSize(const Size(400, 700)),
-      windowManager.setBounds(_lastWindowBounds),
-      setAlwaysOnTop(false),
-      windowManager.setAspectRatio(0),
-    ]);
+    try {
+      await Future.wait([
+        if (showWindowTitleBar)
+          windowManager.setTitleBarStyle(TitleBarStyle.normal),
+        windowManager.setMinimumSize(const Size(400, 700)),
+        if (bounds != null) windowManager.setBounds(bounds),
+        setAlwaysOnTop(false),
+        windowManager.setAspectRatio(0),
+      ]);
+      Utils.reportError('pip: exitDesktopPip done', null);
+    } catch (e) {
+      Utils.reportError('pip: exitDesktopPip failed: $e', null);
+    }
   }
 
   Future<void> enterDesktopPip() async {
     if (isFullScreen.value) return;
 
+    Utils.reportError('pip: enterDesktopPip', null);
     isDesktopPip = true;
 
     _lastWindowBounds = await windowManager.getBounds();
@@ -277,6 +288,7 @@ class PlPlayerController with BlockConfigMixin {
   }
 
   void toggleDesktopPip() {
+    Utils.reportError('pip: toggleDesktopPip isDesktopPip=$isDesktopPip', null);
     if (isDesktopPip) {
       exitDesktopPip();
     } else {

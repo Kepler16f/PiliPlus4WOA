@@ -438,6 +438,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   @override
   void dispose() {
     removeObserverMobile(this);
+    _stopPipDrag();
     _danmakuListener?.cancel();
     _tapGestureRecognizer.dispose();
     _longPressRecognizer?.dispose();
@@ -1077,25 +1078,78 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     }
   }
 
-  // PiP 窗口拖动：windowManager.startDragging() 底层是 WM_SYSCOMMAND SC_MOVE，
-  // 系统移动循环只消费鼠标消息；Flutter 引擎在 Windows 上把触摸走 WM_POINTER
-  // 路径（不合成鼠标消息），所以触控拖不动窗口、鼠标可以。
-  // 改用手势增量 setPosition，鼠标/触摸统一。注意不能用 globalPosition 差值
-  // （桌面端它是相对客户区的坐标，窗口一动就跳），必须累积 details.delta。
+  // PiP 窗口拖动。三个坑都在这里踩过，别再改回去：
+  //
+  // ① 不用 GestureDetector 的 pan，更不能用 windowManager.startDragging()：
+  //    - startDragging() 底层是 WM_SYSCOMMAND SC_MOVE，系统移动循环只消费鼠标
+  //      消息；Flutter 引擎在 Windows 上把触摸走 WM_POINTER（不合成鼠标消息），
+  //      所以触控拖不动窗口；
+  //    - pan 手势参与竞技场，触摸点击按钮时手指的微小移动会让 pan 抢走手势、
+  //      按钮的 tap 被拒绝 —— 表现就是「按钮点了没反应」。
+  //    所以只用 Listener 的 onPointerDown 起步（不参与竞技场），点击与拖动互不干扰。
+  //
+  // ② 起步之后用 pointerRouter 跟踪这个指针，而不是继续用 Listener 的
+  //    onPointerMove：Listener 的后续事件依赖每次 hit test，手指一旦移出头部
+  //    那条窄区域（PiP 里向下拖几十像素就会），move 就断了、窗口卡住不动。
+  //    pointerRouter 是全局指针路由，指针按下后一路跟到底。
+  //
+  // ③ 位置用「相对拖动起点的绝对位移」，不能逐帧累加 delta：Flutter 报的指针
+  //    坐标是相对窗口客户区的，窗口一动，后续事件的坐标基准也跟着动 —— delta
+  //    里混进了我们自己造成的窗口位移，累加会变成负反馈（窗口只以半速跟随、
+  //    一卡一卡）。W_new = W_now + (p_now - p_start) 里 W_now 项恰好抵消它。
+  int? _pipPointer;
   Offset? _pipDragPos;
+  Offset? _pipDragStart;
+  bool _pipDragging = false;
 
-  void _onPipDragStart(DragStartDetails details) {
+  void _onPipPointerDown(PointerDownEvent event) {
+    if (_pipPointer != null) return;
+    _pipPointer = event.pointer;
+    _pipDragStart = event.position;
+    _pipDragging = false;
+    _pipDragPos = null;
     windowManager.getPosition().then((pos) => _pipDragPos = pos);
+    GestureBinding.instance.pointerRouter.addRoute(
+      event.pointer,
+      _onPipPointerEvent,
+    );
   }
 
-  void _onPipDragUpdate(DragUpdateDetails details) {
-    final pos = _pipDragPos;
-    if (pos == null) return;
-    _pipDragPos = pos + details.delta;
-    windowManager.setPosition(_pipDragPos!);
+  void _onPipPointerEvent(PointerEvent event) {
+    if (event is PointerMoveEvent) {
+      final start = _pipDragStart;
+      if (start == null || !event.down) return;
+      if (!_pipDragging) {
+        // 阈值与 tap 的 slop 对齐：没超过就是「点击」，窗口不动，让按钮的 tap
+        // 正常触发；超过才算拖动。起点取越过阈值的这一刻，避免窗口跳一下。
+        final slop = event.kind == PointerDeviceKind.mouse
+            ? kPrecisePointerPanSlop
+            : kTouchSlop;
+        if ((event.position - start).distance < slop) return;
+        _pipDragging = true;
+        _pipDragStart = event.position;
+        return;
+      }
+      final pos = _pipDragPos;
+      if (pos == null) return;
+      _pipDragPos = pos + (event.position - start);
+      windowManager.setPosition(_pipDragPos!);
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _stopPipDrag();
+    }
   }
 
-  void _onPipDragEnd(DragEndDetails details) {
+  void _stopPipDrag() {
+    final pointer = _pipPointer;
+    if (pointer != null) {
+      GestureBinding.instance.pointerRouter.removeRoute(
+        pointer,
+        _onPipPointerEvent,
+      );
+      _pipPointer = null;
+    }
+    _pipDragStart = null;
+    _pipDragging = false;
     _pipDragPos = null;
   }
 
@@ -1762,11 +1816,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                       isFullScreen: isFullScreen,
                       removeSafeArea: plPlayerController.removeSafeArea,
                       child: plPlayerController.isDesktopPip
-                          ? GestureDetector(
+                          ? Listener(
                               behavior: HitTestBehavior.translucent,
-                              onPanStart: _onPipDragStart,
-                              onPanUpdate: _onPipDragUpdate,
-                              onPanEnd: _onPipDragEnd,
+                              onPointerDown: _onPipPointerDown,
                               child: widget.headerControl,
                             )
                           : widget.headerControl,
