@@ -489,20 +489,21 @@ class PlPlayerController with BlockConfigMixin {
     return _instance?.playerStatus.value;
   }
 
-  static Future<void> pauseIfExists({
+  static Future<void>? pauseIfExists({
     bool notify = true,
     bool isInterrupt = false,
-  }) async {
+  }) {
     if (_instance?.playerStatus.isPlaying ?? false) {
-      await _instance?.pause(notify: notify, isInterrupt: isInterrupt);
+      return _instance?.pause(notify: notify, isInterrupt: isInterrupt);
     }
+    return null;
   }
 
-  static Future<void> seekToIfExists(
+  static Future<void>? seekToIfExists(
     Duration position, {
     bool isSeek = true,
-  }) async {
-    await _instance?.seekTo(position, isSeek: isSeek);
+  }) {
+    return _instance?.seekTo(position, isSeek: isSeek);
   }
 
   static double? getVolumeIfExists() {
@@ -2065,11 +2066,10 @@ class PlPlayerController with BlockConfigMixin {
   Future<void> _initializePlayer() async {
     if (_instance == null) return;
     // 设置倍速
-    if (isLive) {
-      await setPlaybackSpeed(1.0);
-    } else {
-      if (_videoPlayerController?.state.rate != _playbackSpeed.value) {
-        await setPlaybackSpeed(_playbackSpeed.value);
+    if (_videoPlayerController != null) {
+      final speed = isLive ? 1.0 : playbackSpeed;
+      if (_videoPlayerController!.state.rate != speed) {
+        await setPlaybackSpeed(speed);
       }
     }
     _initVideoFit();
@@ -2112,6 +2112,37 @@ class PlPlayerController with BlockConfigMixin {
   final Set<ValueChanged<Duration>> _positionListeners = {};
   final Set<ValueChanged<PlayerStatus>> _statusListeners = {};
 
+  Timer? _wakeLockTimer;
+
+  void _startWakeLockTimer() {
+    _wakeLockTimer?.cancel();
+    _wakeLockTimer = Timer(
+      const Duration(milliseconds: 500),
+      _stopWakeLock,
+    );
+  }
+
+  void _stopWakeLockTimer() {
+    _wakeLockTimer?.cancel();
+    _wakeLockTimer = null;
+  }
+
+  void _stopWakeLock() {
+    WakelockPlus.disable();
+    _updatePlaybackState(debugLabel: 'onVideoPaused');
+  }
+
+  void _updatePlaybackState({Duration? position, String? debugLabel}) {
+    videoPlayerServiceHandler?.onUpdateState(
+      playerStatus.value,
+      isBuffering.value,
+      isLive,
+      position: position ?? _videoPlayerController!.state.position,
+      speed: playbackSpeed,
+      debugLabel: debugLabel,
+    );
+  }
+
   /// 播放事件监听
   void _startListeners(NativePlayer player) {
     assert(_subscriptions == null);
@@ -2119,8 +2150,10 @@ class PlPlayerController with BlockConfigMixin {
     _subscriptions = [
       /// playing
       stream.playing.listen((bool playing) {
-        WakelockPlus.toggle(enable: playing);
         if (playing) {
+          _stopWakeLockTimer();
+          _updatePlaybackState();
+          WakelockPlus.enable();
           // ARM64 修改版：播放成功恢复，重置重连冷却/计数，允许下次断流重新计时。
           _reconnecting = false;
           _reconnectAttempts = 0;
@@ -2136,14 +2169,10 @@ class PlPlayerController with BlockConfigMixin {
           playerStatus.value = .playing;
           _ensureStallWatchdog();
         } else {
+          _startWakeLockTimer();
           _disableAutoEnterPip();
           playerStatus.value = .paused;
         }
-        videoPlayerServiceHandler?.onStatusChange(
-          playerStatus.value,
-          isBuffering.value,
-          isLive,
-        );
 
         for (final element in _statusListeners) {
           element(playing ? .playing : .paused);
@@ -2159,6 +2188,8 @@ class PlPlayerController with BlockConfigMixin {
       stream.completed.listen((bool completed) {
         if (completed) {
           playerStatus.value = .completed;
+          _stopWakeLockTimer();
+          _updatePlaybackState();
 
           for (final element in _statusListeners) {
             element(.completed);
@@ -2173,11 +2204,13 @@ class PlPlayerController with BlockConfigMixin {
         final posInSeconds = position.inSeconds;
 
         if (posInSeconds != this.position.value) {
+          if (posInSeconds == 0 && playerStatus.isPlaying) {
+            _updatePlaybackState(position: position);
+          }
+
           if (!isSeeking.value) {
             this.position.value = posInSeconds;
           }
-
-          videoPlayerServiceHandler?.onPositionChange(position);
 
           makeHeartBeat(posInSeconds);
         }
@@ -2192,11 +2225,7 @@ class PlPlayerController with BlockConfigMixin {
       }),
       stream.buffering.listen((bool buffering) {
         isBuffering.value = buffering;
-        videoPlayerServiceHandler?.onStatusChange(
-          playerStatus.value,
-          buffering,
-          isLive,
-        );
+        _updatePlaybackState();
       }),
       stream.log.listen(((PlayerLog log) {
         if (log.level == 'error' || log.level == 'fatal') {
@@ -2412,6 +2441,7 @@ class PlPlayerController with BlockConfigMixin {
     }
     hasToasted = false;
     isSeeking.value = false;
+    _updatePlaybackState();
     // ARM64 修改版（2026-09-17）：记下「用户刚拖过进度条」的时刻。
     // 拖动松手后播放器要重新缓冲、位置也要重新对齐，这段时间画面本来就可能不动；
     // 冻结恢复如果这时插进来，就会和用户自己的拖动打架（自愈重开会把用户拖到的
@@ -2853,6 +2883,7 @@ class PlPlayerController with BlockConfigMixin {
       AndroidHelper$ToDart.onUserLeaveHint = null;
     }
     _timer?.cancel();
+    _stopWakeLockTimer();
     _cancelStallWatchdog();
     // 自愈重开收尾定时器与进行中旗标一并清掉（对抗验证补充）：
     // dispose 本身不等待 _reloadAtCurrentPosition 的 finally，若恰好在这里
@@ -2953,11 +2984,13 @@ class PlPlayerController with BlockConfigMixin {
     final image = await videoPlayerController?.screenshot();
     if (image != null) {
       SmartDialog.showToast('点击弹窗保存截图');
-      showDialog(
+      final dispose = await showDialog<bool>(
         context: Get.context!,
         builder: (context) => GestureDetector(
           onTap: () async {
+            Get.back(result: false);
             final bytes = await image.toByteData(format: .png);
+            image.dispose();
             if (bytes != null) {
               ImageUtils.saveByteImg(
                 bytes: bytes.buffer.asUint8List(),
@@ -2966,7 +2999,6 @@ class PlPlayerController with BlockConfigMixin {
             } else {
               SmartDialog.showToast('保存失败');
             }
-            Get.back();
           },
           child: Align(
             alignment: Alignment.centerRight,
@@ -2992,7 +3024,8 @@ class PlPlayerController with BlockConfigMixin {
             ),
           ),
         ),
-      ).whenComplete(image.dispose);
+      );
+      if (dispose ?? true) image.dispose();
     } else {
       SmartDialog.showToast('截图失败');
     }
