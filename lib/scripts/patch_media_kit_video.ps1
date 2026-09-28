@@ -88,8 +88,9 @@ if (-not [string]::IsNullOrEmpty($RootOverride)) {
 $headerPath = Join-Path $videoDir "angle_surface_manager.h"
 $anglePath = Join-Path $videoDir "angle_surface_manager.cc"
 $videoPath = Join-Path $videoDir "video_output.cc"
+$videoHeaderPath = Join-Path $videoDir "video_output.h"
 
-foreach ($p in @($headerPath, $anglePath, $videoPath)) {
+foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath)) {
     if (-not (Test-Path $p)) { throw "missing source file: $p" }
 }
 
@@ -105,6 +106,10 @@ $TraceHeader = @'
 //   render   VideoOutput::Render() calls  (mpv handed the client a frame)
 //   noTex    ... of those, the ones that bailed out because texture_id_ == 0
 //   cb       Flutter's texture callback invocations (engine asking for content)
+//   cbRace   ... of those, the ones that arrived while textures_ had no entry
+//            for texture_id_ (the registration window, see below). Before this
+//            patch that was a std::out_of_range thrown into Flutter's C++ --
+//            uncaught, it killed the process (0xC0000409 __fastfail).
 //   read     copies from the internal D3D texture to the public shared one
 //   mark     MarkTextureFrameAvailable() calls (texture marked dirty for Flutter)
 //   draw     ANGLESurfaceManager::Draw() calls (GL rendering of a frame)
@@ -140,6 +145,7 @@ struct MKVideoTrace {
   long long video_render = 0;
   long long video_no_texture = 0;
   long long video_cb = 0;
+  long long video_cb_race = 0;
   long long video_read = 0;
   long long video_mark = 0;
   long long angle_draw = 0;
@@ -151,6 +157,7 @@ struct MKVideoTrace {
   long long l_video_render = -1;
   long long l_video_no_texture = -1;
   long long l_video_cb = -1;
+  long long l_video_cb_race = -1;
   long long l_video_read = -1;
   long long l_video_mark = -1;
   long long l_angle_draw = -1;
@@ -180,7 +187,8 @@ struct MKVideoTrace {
     last_tick = now;
     if (video_render == l_video_render &&
         video_no_texture == l_video_no_texture && video_cb == l_video_cb &&
-        video_read == l_video_read && video_mark == l_video_mark &&
+        video_read == l_video_read && video_cb_race == l_video_cb_race &&
+        video_mark == l_video_mark &&
         angle_draw == l_angle_draw && angle_read == l_angle_read &&
         angle_null == l_angle_null && angle_mcfail == l_angle_mcfail &&
         angle_build == l_angle_build) {
@@ -190,6 +198,7 @@ struct MKVideoTrace {
     l_video_no_texture = video_no_texture;
     l_video_cb = video_cb;
     l_video_read = video_read;
+    l_video_cb_race = video_cb_race;
     l_video_mark = video_mark;
     l_angle_draw = angle_draw;
     l_angle_read = angle_read;
@@ -199,10 +208,12 @@ struct MKVideoTrace {
     FILE* f = nullptr;
     if (::fopen_s(&f, path.c_str(), "a") == 0 && f != nullptr) {
       std::fprintf(f,
-                   "t=%lu render=%lld noTex=%lld cb=%lld read=%lld mark=%lld "
-                   "draw=%lld aread=%lld null=%lld mcFail=%lld build=%lld\n",
+                   "t=%lu render=%lld noTex=%lld cb=%lld cbRace=%lld read=%lld "
+                   "mark=%lld draw=%lld aread=%lld null=%lld mcFail=%lld "
+                   "build=%lld\n",
                    static_cast<unsigned long>(now), video_render,
-                   video_no_texture, video_cb, video_read, video_mark,
+                   video_no_texture, video_cb, video_cb_race, video_read,
+                   video_mark,
                    angle_draw, angle_read, angle_null, angle_mcfail,
                    angle_build);
       std::fclose(f);
@@ -383,22 +394,155 @@ $NewMark = @'
     } catch (...) {
 '@
 
-$OldCallbackAnchor = @'
-kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle, [&](auto, auto) {
-'@
-
-$NewCallbackAnchor = @'
-kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle, [&](auto, auto) {
-              g_mkTrace.video_cb++;
-'@
-
-$OldSurfaceRead = @'
-surface_manager_->Read();
-'@
-
-$NewSurfaceRead = @'
-g_mkTrace.video_read++;
+$OldGpuCallbackBody = @'
+              if (texture_id_) {
                 surface_manager_->Read();
+                return textures_.at(texture_id_).get();
+              } else {
+                return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+              }
+'@
+
+# The crash this fixes (dump analysis, 2026-09-29): two minidumps from the 2.1.5
+# build died with 0xC0000409 __fastfail(FAST_FAIL_FATAL_APP_EXIT) thrown from
+# this very lambda (media_kit_video_plugin.dll+0xf818), through msvcp140 ->
+# VCRUNTIME140 -> std::terminate. The literal passed to the CRT helper was
+# "invalid unordered_map<K, T> key" = std::out_of_range from unordered_map::at.
+#
+# Resize() publishes the callback to the engine on this line:
+#     texture_id_ = registrar_->texture_registrar()->RegisterTexture(...)
+# and only THEN inserts it:
+#     textures_.emplace(std::make_pair(texture_id_, std::move(texture)))
+# while the entry of the *previous* texture is erased asynchronously by the
+# UnregisterTexture() completion. So the engine can invoke the callback while
+# texture_id_ is already non-zero but textures_ has no entry for it -- at()
+# threw, nothing catches it, and the process died. Any video that makes the
+# app call setSize() (our portrait/rect-unusable path) triggers a Resize() and
+# therefore re-opens the window -- hence "some videos" crash on open.
+#
+# Fix: look the entry up and answer "no descriptor" instead. A null descriptor
+# is a normal answer for the engine (the else-branch below already returns one);
+# a thrown exception is not.
+$NewGpuCallbackBody = @'
+              if (texture_id_) {
+                g_mkTrace.video_cb++;
+                g_mkTrace.video_read++;
+                surface_manager_->Read();
+                // PiliPlus4WOA: see the note above -- RegisterTexture() hands
+                // this callback to the engine before textures_.emplace() runs,
+                // so a lookup can legally miss. Report "no descriptor".
+                const auto mk_it = textures_.find(texture_id_);
+                if (mk_it == textures_.end()) {
+                  g_mkTrace.video_cb_race++;
+                  return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+                }
+                return mk_it->second.get();
+              } else {
+                return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+              }
+'@
+
+$OldPixelBufferBody = @'
+          if (texture_id_) {
+            return pixel_buffer_textures_.at(texture_id_).get();
+          } else {
+            return (FlutterDesktopPixelBuffer*)nullptr;
+          }
+'@
+
+# Same registration race as the GPU callback above (S/W rendering path).
+$NewPixelBufferBody = @'
+          if (texture_id_) {
+            const auto mk_it = pixel_buffer_textures_.find(texture_id_);
+            if (mk_it == pixel_buffer_textures_.end()) {
+              g_mkTrace.video_cb_race++;
+              return (FlutterDesktopPixelBuffer*)nullptr;
+            }
+            return mk_it->second.get();
+          } else {
+            return (FlutterDesktopPixelBuffer*)nullptr;
+          }
+'@
+
+$OldSwCurrentSize = @'
+  if (pixel_buffer_ != nullptr) {
+    current_width = pixel_buffer_textures_.at(texture_id_)->width;
+    current_height = pixel_buffer_textures_.at(texture_id_)->height;
+  }
+'@
+
+$NewSwCurrentSize = @'
+  if (pixel_buffer_ != nullptr) {
+    // PiliPlus4WOA: a lookup can miss during the registration window (see the
+    // GPU callback above); skip the resize request instead of throwing.
+    const auto mk_it = pixel_buffer_textures_.find(texture_id_);
+    if (mk_it == pixel_buffer_textures_.end()) {
+      g_mkTrace.video_cb_race++;
+      return;
+    }
+    current_width = mk_it->second->width;
+    current_height = mk_it->second->height;
+  }
+'@
+
+$OldSwRenderSize = @'
+    if (pixel_buffer_ != nullptr) {
+      int32_t size[]{
+          static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->width),
+          static_cast<int32_t>(pixel_buffer_textures_.at(texture_id_)->height),
+      };
+'@
+
+$NewSwRenderSize = @'
+    if (pixel_buffer_ != nullptr) {
+      // PiliPlus4WOA: skip the frame if the entry is not there yet (see above).
+      const auto mk_it = pixel_buffer_textures_.find(texture_id_);
+      if (mk_it == pixel_buffer_textures_.end()) {
+        g_mkTrace.video_cb_race++;
+        return;
+      }
+      int32_t size[]{
+          static_cast<int32_t>(mk_it->second->width),
+          static_cast<int32_t>(mk_it->second->height),
+      };
+'@
+
+$OldHWidth = @'
+    if (pixel_buffer_ != nullptr && texture_id_) {
+      return pixel_buffer_textures_.at(texture_id_)->width;
+    }
+'@
+
+# VideoOutput::width()/height() read the same map from a const getter that
+# Render/CheckAndResize call. Guard them the same way so the S/W rendering
+# path (reachable: the app disables hardware acceleration when the user picks
+# software decoding) can never throw either.
+$NewHWidth = @'
+    if (pixel_buffer_ != nullptr && texture_id_) {
+      // PiliPlus4WOA: a lookup can miss during the texture registration
+      // window (see video_output.cc); fall through to the requested size
+      // instead of throwing out_of_range into whoever is asking.
+      const auto mk_it = pixel_buffer_textures_.find(texture_id_);
+      if (mk_it != pixel_buffer_textures_.end()) {
+        return mk_it->second->width;
+      }
+    }
+'@
+
+$OldHHeight = @'
+    if (pixel_buffer_ != nullptr && texture_id_) {
+      return pixel_buffer_textures_.at(texture_id_)->height;
+    }
+'@
+
+$NewHHeight = @'
+    if (pixel_buffer_ != nullptr && texture_id_) {
+      // PiliPlus4WOA: see the note above.
+      const auto mk_it = pixel_buffer_textures_.find(texture_id_);
+      if (mk_it != pixel_buffer_textures_.end()) {
+        return mk_it->second->height;
+      }
+    }
 '@
 
 $edits = @(
@@ -411,13 +555,19 @@ $edits = @(
     @{ file = $anglePath;  old = $OldCreate;         new = $NewCreate;                      label = "angle_surface_manager.cc: Create counter" },
     @{ file = $videoPath;  old = $OldRenderHead;     new = $NewRenderHead;                  label = "video_output.cc: Render counters" },
     @{ file = $videoPath;  old = $OldMark;           new = $NewMark;                        label = "video_output.cc: MarkTextureFrameAvailable counter" },
-    @{ file = $videoPath;  old = $OldCallbackAnchor; new = $NewCallbackAnchor;              label = "video_output.cc: texture callback counter" },
-    @{ file = $videoPath;  old = $OldSurfaceRead;    new = $NewSurfaceRead;                 label = "video_output.cc: Read counter" }
+    @{ file = $videoPath;  old = $OldGpuCallbackBody; new = $NewGpuCallbackBody;           label = "video_output.cc: GPU callback guard + counters" },
+    @{ file = $videoPath;  old = $OldPixelBufferBody; new = $NewPixelBufferBody;           label = "video_output.cc: pixel buffer callback guard" },
+    @{ file = $videoPath;  old = $OldSwCurrentSize;  new = $NewSwCurrentSize;               label = "video_output.cc: CheckAndResize S/W guard" },
+    @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
+    @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
+    @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" }
 )
+
+
 
 # ---- pass 1: verify every anchor BEFORE writing anything -----------------
 $states = @{}
-foreach ($p in @($headerPath, $anglePath, $videoPath)) {
+foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath)) {
     $states[$p] = Get-Normalized $p
 }
 # 锚点也要统一成 LF：本脚本在 Windows 上是 CRLF，here-string 里的换行因此是 CRLF，
