@@ -389,11 +389,17 @@ class RefreshIndicatorState extends State<RefreshIndicator>
         } else {
           _dismiss(RefreshIndicatorStatus.canceled);
         }
-      } else if (_status == RefreshIndicatorStatus.snap ||
-          _status == RefreshIndicatorStatus.done ||
+      } else if (_status == RefreshIndicatorStatus.done ||
           _status == RefreshIndicatorStatus.canceled) {
         _dismiss(RefreshIndicatorStatus.canceled);
       }
+      // 注意 snap 不在此列（ARM64 修改版 2026-09-28 修）：snap 是 _show() 的中间态，
+      // 150ms 后由那句 `if (mounted && _status == RefreshIndicatorStatus.snap)`
+      // 决定是否进入 refresh 并调用 onRefresh()。若在 snap 期间把它 dismiss 掉，
+      // _status 变成 canceled → 那个判断永不成立 → **onRefresh() 一次都不会被调用**
+      // （下拉动作被静默吞掉，show() 返回的 future 也永不完成），页面数据不刷新。
+      // 而正常路径下 snap 必然在 150ms 内推进到 refresh、不会长期滞留，
+      // 所以这里不需要「恢复」它。
       switch (_status) {
         case RefreshIndicatorStatus.drag:
           if (_valueColor.value!.a == _effectiveValueColor.a) {
@@ -536,7 +542,18 @@ class RefreshIndicatorState extends State<RefreshIndicator>
           _status = RefreshIndicatorStatus.refresh;
         });
 
-        widget.onRefresh().whenComplete(() {
+        // onRefresh() 可能**同步**抛异常（例如页面在首帧就碰了还没就绪的资源）。
+        // 那样 whenComplete 根本挂不上，而离开 refresh 的唯一出口就在这里 ——
+        // 于是不确定进度的加载圈会一直转（用户报的「刷新动画卡住」，重进页面
+        // 才消失）。这里把同步异常也走完收尾流程。
+        Future<void> pending;
+        try {
+          pending = widget.onRefresh();
+        } catch (e) {
+          TouchDebugLog.log('RefreshIndicator.onRefresh threw synchronously: $e');
+          pending = Future<void>.value();
+        }
+        pending.whenComplete(() {
           if (mounted && _status == RefreshIndicatorStatus.refresh) {
             completer.complete();
             _dismiss(RefreshIndicatorStatus.done);
