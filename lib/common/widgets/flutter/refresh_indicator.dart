@@ -13,6 +13,7 @@ import 'package:PiliPlus/common/widgets/scroll_physics.dart'
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/touch_debug_log.dart';
+import 'package:PiliPlus/utils/utils.dart';
 import 'package:extended_nested_scroll_view/refresh.dart';
 import 'package:flutter/foundation.dart' show clampDouble;
 import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
@@ -550,7 +551,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
         try {
           pending = widget.onRefresh();
         } catch (e) {
-          TouchDebugLog.log('RefreshIndicator.onRefresh threw synchronously: $e');
+          Utils.reportError('RefreshIndicator.onRefresh threw synchronously: $e', null);
           pending = Future<void>.value();
         }
         pending.whenComplete(() {
