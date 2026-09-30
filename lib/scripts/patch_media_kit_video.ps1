@@ -545,6 +545,128 @@ $NewHHeight = @'
     }
 '@
 
+$OldVideoOutputDtor = @'
+            std::lock_guard<std::mutex> lock(textures_mutex_);
+            texture_variants_.clear();
+            // H/W
+            textures_.clear();
+            // S/W
+            pixel_buffer_textures_.clear();
+            // Free (call destructor) |ANGLESurfaceManager| through the thread
+            // pool. This will ensure synchronized EGL or ANGLE usage & won't
+            // conflict with |Render| or |CheckAndResize| of other
+            // |VideoOutput|s.
+            surface_manager_.reset(nullptr);
+            promise.set_value();
+          });
+        });
+  }
+
+  promise.get_future().wait();
+  texture_id_ = 0;
+
+  thread_pool_ref_->Post([render_context = render_context_]() {
+    mpv_render_context_free(render_context);
+  });
+}
+'@
+
+# VideoOutput::~VideoOutput() can hang forever, and that hang is fatal.
+#
+# Dump evidence (2026-09-30): 0xC0000409 __fastfail from libmpv-2.dll+0x3c8ee0, whose
+# preceding instruction loads the literal
+#   "Broken API use: mpv_render_context_free() not called."
+# i.e. mpv aborted because the handle was destroyed while a render context was
+# still alive. media_kit's Player.dispose() defers mpv_terminate_destroy() by
+# only 5 seconds, so the render context has to be freed within that window.
+#
+# But the original code ends with an unconditional
+#   promise.get_future().wait();
+# while promise.set_value() is called ONLY from inside the UnregisterTexture()
+# completion callback -- and that callback is registered only when texture_id_ is
+# non-zero. Destroy a VideoOutput before its first frame ever registered a texture
+# (quickly switching videos, or a media that never produces video-out-params) and
+# nothing can ever set that promise: the destructor blocks forever on the detached
+# thread, so it never releases the render context, and 5 s later mpv_fatal aborts
+# the process. One leaked thread and no crash log line -- exactly the "sometimes
+# the app just freezes and dies" report.
+#
+# Fix: give the no-texture case its own pool task that performs the same cleanup
+# and DOES set the promise, and move mpv_render_context_free() into the awaited
+# task (outside the textures mutex) so the context is guaranteed to be released
+# before the destructor returns.
+$OldVideoOutputDtor = @'
+            std::lock_guard<std::mutex> lock(textures_mutex_);
+            texture_variants_.clear();
+            // H/W
+            textures_.clear();
+            // S/W
+            pixel_buffer_textures_.clear();
+            // Free (call destructor) |ANGLESurfaceManager| through the thread
+            // pool. This will ensure synchronized EGL or ANGLE usage & won't
+            // conflict with |Render| or |CheckAndResize| of other
+            // |VideoOutput|s.
+            surface_manager_.reset(nullptr);
+            promise.set_value();
+          });
+        });
+  }
+
+  promise.get_future().wait();
+  texture_id_ = 0;
+
+  thread_pool_ref_->Post([render_context = render_context_]() {
+    mpv_render_context_free(render_context);
+  });
+}
+'@
+
+$NewVideoOutputDtor = @'
+            {
+              std::lock_guard<std::mutex> lock(textures_mutex_);
+              texture_variants_.clear();
+              // H/W
+              textures_.clear();
+              // S/W
+              pixel_buffer_textures_.clear();
+              // Free (call destructor) |ANGLESurfaceManager| through the thread
+              // pool. This will ensure synchronized EGL or ANGLE usage & won't
+              // conflict with |Render| or |CheckAndResize| of other
+              // |VideoOutput|s.
+              surface_manager_.reset(nullptr);
+            }
+            // PiliPlus4WOA: release the render context inside this awaited task,
+            // and *after* dropping textures_mutex_ so mpv cannot deadlock against
+            // a queued Render task.
+            mpv_render_context_free(render_context_);
+            render_context_ = nullptr;
+            promise.set_value();
+          });
+        });
+  } else {
+    // PiliPlus4WOA: no texture was ever registered, so no callback above will
+    // ever run. Wait on a task we post ourselves instead of hanging forever.
+    thread_pool_ref_->Post([&]() {
+      std::cout << "VideoOutput::~VideoOutput (no texture): "
+                << reinterpret_cast<int64_t>(handle_) << std::endl;
+      {
+        std::lock_guard<std::mutex> lock(textures_mutex_);
+        texture_variants_.clear();
+        textures_.clear();
+        pixel_buffer_textures_.clear();
+        surface_manager_.reset(nullptr);
+      }
+      mpv_render_context_free(render_context_);
+      render_context_ = nullptr;
+      promise.set_value();
+    });
+  }
+
+  promise.get_future().wait();
+  texture_id_ = 0;
+}
+'@
+
 $edits = @(
     @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
     @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
@@ -560,7 +682,8 @@ $edits = @(
     @{ file = $videoPath;  old = $OldSwCurrentSize;  new = $NewSwCurrentSize;               label = "video_output.cc: CheckAndResize S/W guard" },
     @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
     @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
-    @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" }
+    @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" },
+    @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" }
 )
 
 
