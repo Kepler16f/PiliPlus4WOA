@@ -1014,7 +1014,7 @@ class PlPlayerController with BlockConfigMixin {
   ///     所以必须配一个加载指示。
   ///
   /// 这里统一处理：置缓冲态 → 重开 → 显式恢复播放（[play] 会清 `_userPaused`）
-  /// → 等 `stream.playing` 真的变 true（最多 [_reloadWaitTimeout]）→ 清缓冲态。
+  /// → 等 `stream.playing` 真的变 true（最多 [_reloadConfirmTimeout]）→ 清缓冲态。
   ///
   /// 全程置 [isRecovering]，让自愈加载指示与常规缓冲指示**互斥**（见该字段注释）。
   Future<void> _reloadAtCurrentPosition() async {
@@ -1060,7 +1060,7 @@ class PlPlayerController with BlockConfigMixin {
             ),
             play: true,
           )
-          .timeout(_reloadWaitTimeout);
+          .timeout(_reloadOpenTimeout);
       // 显式再喊一次播放：
       //  - 兜住上面说的「open 内部留下 pause=true」；
       //  - _startPlayback 在全局回调被清空时也能落到本控制器的 play()。
@@ -1072,12 +1072,23 @@ class PlPlayerController with BlockConfigMixin {
       // `ctr.stream.playing` 是 broadcast stream，**不会**向新订阅者重放最近值，
       // `firstWhere` 只等订阅之后的下一次事件。如果 `open(play: true)` 返回时播放
       // 其实已经恢复（state.playing 已为 true），直接去等会白耗整段
-      // _reloadWaitTimeout（6s），自愈加载指示也要多挂 6s 才消失 —— 而
+      // _reloadConfirmTimeout（12s），自愈加载指示也要多挂 12s 才消失 —— 而
       // isRecovering 正是这轮新加的指示，不能让它拖这么长。
       if (!ctr.state.playing) {
-        await ctr.stream.playing
-            .firstWhere((e) => e)
-            .timeout(_reloadWaitTimeout);
+        // 与一个 500ms 轮询赛跑（2026-10-01）：`stream.playing` 是 broadcast
+        // stream，不重放最近值 —— 上面那次「先读当前状态」只能挡住「事件已经
+        // 发生」的情况；如果 playing 恰好落在「读状态」与「订阅」之间，单靠
+        // firstWhere 就要白等满整个超时，确认窗口越长亏得越多（4s→12s）。
+        // 轮询到就立刻返回，最坏也只亏 500ms。
+        await Future.any<void>([
+          ctr.stream.playing.firstWhere((e) => e).then((_) {}),
+          Future.doWhile(() async {
+            await Future<void>.delayed(
+              const Duration(milliseconds: 500),
+            );
+            return !ctr.state.playing;
+          }).then((_) {}),
+        ]).timeout(_reloadConfirmTimeout);
       }
     } catch (e) {
       // 超时或播放器已释放：记一条，别让缓冲态卡住。
@@ -1090,6 +1101,13 @@ class PlPlayerController with BlockConfigMixin {
         isBuffering.value = false;
       }
       isRecovering.value = false;
+      // 重开结束后再续一次音频宽限期（2026-10-01）：AO 是重开时才挂回来的，
+      // `current-ao` / `audio-pts` 会短暂缺失；而开头的 `_audioStallGrace`（8s）
+      // 已经覆盖不到「确认窗口拉长到 12s」之后的那一段了，续一次免得刚恢复
+      // 就被判成「音频停摆」又叠一层自愈。
+      if (_playerCount != 0) {
+        _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
+      }
       // 再补一次：`playing` 事件有时早于音频输出真正接上，
       // 形成「画面在走、声音没有」；这里延迟一点再喊一次播放，代价极低。
       // 已 dispose（_playerCount == 0）就不再挂这个定时器，免得 dispose 之后
@@ -1232,7 +1250,10 @@ class PlPlayerController with BlockConfigMixin {
   // 一次网络重连会顺带把接下来 10s 的卡死恢复一起压掉（反之亦然），
   // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
   DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _stallCooldown = Duration(seconds: 4);
+  /// 看门狗两级恢复之间的冷却（1x；倍速见 _stallCooldownNow）。
+  /// 2026-10-01 由 4s 收到 3s：它只节流「恢复动作」，不参与「判定」
+  /// （判定仍是 2s 窗口 + 滑动窗口计数），所以压低不会带来误判。
+  static const Duration _stallCooldown = Duration(seconds: 3);
 
   // ── 倍速因子（ARM64 修改版，2026-09-17）─────────────────────────────────
   //
@@ -1260,7 +1281,22 @@ class PlPlayerController with BlockConfigMixin {
 
   // 自动重开的收尾定时器（见 _reloadAtCurrentPosition）。
   Timer? _reloadWatchdog;
-  static const Duration _reloadWaitTimeout = Duration(seconds: 4);
+  /// 重开时 `open()` 这条链本身的超时（stop(open:true) → loadfile）。
+  /// 它只负责「别让 open 永不返回」——open 返回不代表画面回来了。
+  static const Duration _reloadOpenTimeout = Duration(seconds: 6);
+
+  /// 重开后等 `stream.playing` 回调确认的时间（2026-10-01 按用户反馈拆出来）。
+  ///
+  /// 原来 open 和确认共用 4s。但这两件事的量级差很远：open 只是把命令发下去，
+  /// 确认要等「重新连接 → 重新缓冲 → 首帧出来 → 音频接上」。WOA + 慢 CDN 下
+  /// 这一步经常超过 4s，于是确认先超时 —— 代码判定「没救回来」，清掉
+  /// isRecovering/isBuffering，可播放器其实马上就要恢复了。后果有两个：
+  ///   1. 自愈加载指示提前消失，用户看到的是「闪一下圈又回到死图」；
+  ///   2. 状态机认为这一级失败，看门狗/冻结阶梯继续往上叠更重的动作
+  ///      （整链重开、重新拉流），越救越乱 —— 用户的原话就是
+  ///      「重建的反应不够快、回调的时间不够长」。
+  /// 给足 12s；真正卡死时仍由超时兜底，不会永久挂着（finally 照样清旗标）。
+  static const Duration _reloadConfirmTimeout = Duration(seconds: 12);
 
   // ── 管线诊断（ARM64 修改版，2026-09-14）────────────────────────────────
   // 为什么需要它：上一轮用户报「最近一次画面卡住完全没有日志」。原因很直接 ——
@@ -1293,10 +1329,16 @@ class PlPlayerController with BlockConfigMixin {
   int? _appliedSurfaceHeight;
   // 「画面冻结」判定的状态（见 onPictureFrozen）。
   DateTime _lastPictureResyncAt = DateTime.fromMillisecondsSinceEpoch(0);
-  // 冻结判定的基础冷却（2026-09-18：10s → 6s → 4s）。用户两次反馈「卡死重建
-  // 时间有点长」；像素采样已经把探测压到 ~4s，冷却再长就等于把感知时间又拉回去。
-  // 倍速播放时还会在 onPictureFrozen 里再压短（≥2x 为 2s、>1.5x 为 3s）。
-  static const Duration _pictureResyncCooldown = Duration(seconds: 4);
+  // 「像素冻结」两次自愈之间至少隔多久（1x；倍速方面见 onPictureFrozen ——
+  // 那里还会按倍速再压短：≥2x 为 2s、>1.5x 为 3s）。
+  // 历史：2026-09-18 10s → 6s → 4s（用户两次反馈「卡死重建时间有点长」），
+  //       2026-10-01 4s → 3s。这一次是配合采样周期 2s→1s（view.dart）：
+  //       一次冻结从「探测 ~6s + 冷却 4s」缩到「探测 ~3s + 冷却 3s」，重开这类
+  //       重动作大约快一倍到达。之所以值得动冷却，是因为实机日志里第 1 级
+  //       「重建输出表面」几乎救不回来（19 次冻结、18 次直接升级），真正有效的
+  //       就是这一级重开。
+  // 下限不低于采样周期，避免同一个采样窗口里反复触发。
+  static const Duration _pictureResyncCooldown = Duration(seconds: 3);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
   // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
@@ -1670,6 +1712,17 @@ class PlPlayerController with BlockConfigMixin {
       //   所以这里单独 return，既不动阶梯、也不动检测基线；
       //   重开结束后，下一 tick 从上次的状态继续判定。
       if (isRecovering.value) {
+        // 自愈重开期间不做判定 —— 但**必须把检测基线一起丢掉**
+        // （2026-10-01，确认窗口 4s→12s 后补）：这里的 return 在
+        // `_stallWatchdogLastDrops = drops` 之前，基线会一直停在
+        // 重开前的值；窗口一长（最多 12s + 看门狗自身的 2s），重开结束后
+        // 第一个窗口就是拿「十几秒的丢帧增量」去和一个 2s 窗口的阈值比，
+        // 极易误判成「还在丢帧」，于是刚救回来立刻又升级一次恢复。
+        // 只清基线（下一 tick 走 last == null 分支重新起算）与投票窗口，
+        // **不动 `_stallRecoveryAttempts`** —— 阶梯该升还得升，那是上面
+        // 这段注释要保住的东西。
+        _stallWatchdogLastDrops = null;
+        _stallWindowHistory.clear();
         return;
       }
       final drops = _intProp('frame-drop-count');
@@ -2039,6 +2092,13 @@ class PlPlayerController with BlockConfigMixin {
     // 播放已恢复则不再继续。注意不能只看 playerStatus.isPlaying：画面冻结时
     // 音频照常播放、状态仍是 playing，旧写法会把这类重连直接丢弃（等于完全
     // 放弃自愈）。这里要求「画面也在推进」才算恢复。
+    // 自愈重开正在进行：它自己会把播放拉起来，这里再插一次 open 只会互相
+    // 打断（确认窗口 4s→12s 后这段重合时间明显变长，更容易撞上）。
+    // 让出这一次并清旗标，之后仍可再重连。
+    if (isRecovering.value) {
+      _reconnecting = false;
+      return;
+    }
     if (playerStatus.isPlaying && !isBuffering.value && !_videoStalled) {
       _reconnecting = false;
       return;

@@ -2239,20 +2239,28 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   // 画面不动，断裂点就只能在「ANGLE 表面 → Flutter 纹理 → 合成」这一段；
   // 而对这一段，应用层唯一能观测到的信号就是**画面像素本身**。
   //
-  // 做法：每 3s 把视频那一层 RepaintBoundary 以极低分辨率抓成一张小图
-  // （pixelRatio 0.02，只有几百字节），与上一次比较；连续 3 次完全相同
-  // （约 9s，且期间确实在播、不在跳转）就判定为「画面冻结」，交给控制器处理。
-  // 抓取分辨率极低，开销可以忽略。
+  // 做法：按 _freezeSamplePeriod（现为 1s）把视频那一层 RepaintBoundary 以极低
+  // 分辨率抓成一张小图（pixelRatio _freezeSampleScale = 0.05，只有几百字节），
+  // 与上一次比较；连续 _freezeSamplesToJudge（现为 2）次完全相同、且期间确实
+  // 在播、不在跳转、不在重开，就判定为「画面冻结」，交给控制器处理。
+  // 具体节拍与历史见下面那段注释；抓取分辨率极低，开销可以忽略。
   Timer? _freezeSampler;
   Uint8List? _lastFramePixels;
   int _unchangedFrameSamples = 0;
-  // 采样周期与判定次数（ARM64 修改版，2026-09-18 再次提速）：
-  //   - 周期 3s → 2s，判定 3 次 → 2 次：1 倍速下探测从 ~9s 缩到 ~4s。
-  //   - 恢复动作本身是「不动播放位置」的重建/重开，误判的代价只是白做一次，
-  //     所以值得更早出手；用户反馈「卡死重建时间有点长」后进一步压短。
-  //   - 判定后不清零计数（见 _samplePicture 里的说明），画面仍冻则每 2s 再报，
-  //     由 PlPlayerController.onPictureFrozen 的冷却与升级阶梯负责节流。
-  static const Duration _freezeSamplePeriod = Duration(seconds: 2);
+  // 采样周期与判定次数（ARM64 修改版；2026-09-18 提速一次、2026-10-01 再提速）：
+  //   - 周期 3s → 2s、判定 3 次 → 2 次；2026-10-01 周期再 2s → 1s。
+  //     **探测时长 = (判定次数 + 1) × 周期**（第一次采样只是建立基准，
+  //     `_lastFramePixels` 从 null 开始，所以要多一次比较）：
+  //     (3+1)×3s ≈ 12s → (2+1)×2s ≈ 6s → (2+1)×1s ≈ 3s，另加 0~1 个周期的
+  //     采样相位偏移。
+  //     依据是用户反馈「卡死重建的反应不够快、回调的时间不够长」：前者靠这里
+  //     （更早发现）与 onPictureFrozen 的冷却缩短一起解决，后者靠
+  //     PlPlayerController._reloadConfirmTimeout 加长。
+  //   - 恢复动作本身是「不动播放位置」的重建（第 1 级）或带着回退的重开，
+  //     误判的代价只是白做一次，所以值得更早出手。
+  //   - 判定后不清零计数（见 _samplePicture 里的说明），画面仍冻则每个采样周期
+  //     （1s）再报一次，由 PlPlayerController.onPictureFrozen 的冷却与升级阶梯节流。
+  static const Duration _freezeSamplePeriod = Duration(seconds: 1);
   static const int _freezeSamplesToJudge = 2;
   static const double _freezeSampleScale = 0.05;
 
@@ -2265,7 +2273,24 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     });
   }
 
+  /// 采样重入保护（2026-10-01）。`Timer.periodic` 不等这个 async 函数返回，
+  /// 而采样里有两处 await（toImage / toByteData）。周期从 2s 收到 1s 之后，
+  /// 一次慢采样（GPU→CPU 回读正好撞上吃紧的渲染链）就会让两次采样叠在一起：
+  /// 两次都拿同一个 _lastFramePixels 去比，`_unchangedFrameSamples` 被多算，
+  /// 判定提前触发 —— 而这一档恰恰要求它准。
+  bool _sampling = false;
+
   Future<void> _samplePicture() async {
+    if (_sampling) return;
+    _sampling = true;
+    try {
+      await _samplePictureOnce();
+    } finally {
+      _sampling = false;
+    }
+  }
+
+  Future<void> _samplePictureOnce() async {
     if (!mounted) return;
     // 只在「画面本来就应该在动」的时候判定。
     // 缓冲时必须跳过：实机日志里有一次触发就是 buffering=true / vf-fps=null
@@ -2295,9 +2320,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         _unchangedFrameSamples++;
         if (_unchangedFrameSamples >= _freezeSamplesToJudge) {
           // 故意**不**把计数清零（ARM64 修改版，2026-09-17）：清零之后下次判定
-          // 又要重新攒够 _freezeSamplesToJudge 个采样（4s），而这段时间用户看
+          // 又要重新攒够 _freezeSamplesToJudge 个采样（2 次 × 1s），这段时间用户看的
           // 的就是一张死图 —— 恢复失败的代价被采样周期放大了一倍。
-          // 保持计数后，画面仍然没变就每个采样周期（2s）再报一次，由
+          // 保持计数后，画面仍然没变就每个采样周期（1s）再报一次，由
           // PlPlayerController.onPictureFrozen 自己的冷却与升级阶梯负责节流。
           // 画面一旦真的恢复，下一个采样就与上一帧不同 → 计数自然归零。
           plPlayerController.onPictureFrozen();
