@@ -2301,6 +2301,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         plPlayerController.isBuffering.value ||
         plPlayerController.isRecovering.value) {
       _unchangedFrameSamples = 0;
+      _lastFramePixels = null;
       return;
     }
     final renderObject = _videoKey.currentContext?.findRenderObject();

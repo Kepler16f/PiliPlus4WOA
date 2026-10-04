@@ -1061,34 +1061,29 @@ class PlPlayerController with BlockConfigMixin {
             play: true,
           )
           .timeout(_reloadOpenTimeout);
-      // 显式再喊一次播放：
-      //  - 兜住上面说的「open 内部留下 pause=true」；
-      //  - _startPlayback 在全局回调被清空时也能落到本控制器的 play()。
-      _startPlayback();
-      // 等 playing 真的变 true。等不到就算了（超时后交给既有的
-      // 断流/卡死看门狗继续救），无论如何都要把缓冲态清掉。
-      //
-      // 先读当前状态再决定要不要等（2026-09-17 补）：
-      // `ctr.stream.playing` 是 broadcast stream，**不会**向新订阅者重放最近值，
-      // `firstWhere` 只等订阅之后的下一次事件。如果 `open(play: true)` 返回时播放
-      // 其实已经恢复（state.playing 已为 true），直接去等会白耗整段
-      // _reloadConfirmTimeout（12s），自愈加载指示也要多挂 12s 才消失 —— 而
-      // isRecovering 正是这轮新加的指示，不能让它拖这么长。
-      if (!ctr.state.playing) {
-        // 与一个 500ms 轮询赛跑（2026-10-01）：`stream.playing` 是 broadcast
-        // stream，不重放最近值 —— 上面那次「先读当前状态」只能挡住「事件已经
-        // 发生」的情况；如果 playing 恰好落在「读状态」与「订阅」之间，单靠
-        // firstWhere 就要白等满整个超时，确认窗口越长亏得越多（4s→12s）。
-        // 轮询到就立刻返回，最坏也只亏 500ms。
-        await Future.any<void>([
-          ctr.stream.playing.firstWhere((e) => e).then((_) {}),
-          Future.doWhile(() async {
-            await Future<void>.delayed(
-              const Duration(milliseconds: 500),
-            );
-            return !ctr.state.playing;
-          }).then((_) {}),
-        ]).timeout(_reloadConfirmTimeout);
+
+      // 显式再喊一次播放（await 确保命令下发并清理 _userPaused）。
+      await _startPlayback();
+
+      // 等待真正起播（位置推进，或 core-idle=no 且未暂停）。
+      // 循环中定期检查：若 mpv 被置为 pause=yes 或 playerStatus 变 paused，再次拉起 _startPlayback()。
+      // 在此期间 isRecovering.value 维持为 true，确保 view.dart 的采样器不会把网络加载期误判为画面冻结。
+      final initialPos = ctr.state.position.inMilliseconds;
+      final confirmStart = DateTime.now();
+      while (DateTime.now().difference(confirmStart) < _reloadConfirmTimeout) {
+        if (_playerCount == 0) break;
+        final mpvPause = _mpvProp('pause');
+        if (mpvPause == 'yes' || !playerStatus.isPlaying) {
+          await _startPlayback();
+        }
+        final currentPos = ctr.state.position.inMilliseconds;
+        final coreIdle = _mpvProp('core-idle');
+        final posAdvanced = currentPos > initialPos && (currentPos - initialPos) >= 100;
+        final decoding = coreIdle == 'no' && mpvPause != 'yes';
+        if (posAdvanced || decoding) {
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 300));
       }
     } catch (e) {
       // 超时或播放器已释放：记一条，别让缓冲态卡住。
@@ -1101,22 +1096,30 @@ class PlPlayerController with BlockConfigMixin {
         isBuffering.value = false;
       }
       isRecovering.value = false;
+      // 重开完成后，把下一次冻结自愈的冷却起点重置为当前时刻！
+      // 避免重开耗时吃掉冷却时间后，刚恢复又因第一帧延迟立刻再次触发冻结。
+      _lastPictureResyncAt = DateTime.now();
+      _lastStallRecoverAt = DateTime.now();
+
       // 重开结束后再续一次音频宽限期（2026-10-01）：AO 是重开时才挂回来的，
-      // `current-ao` / `audio-pts` 会短暂缺失；而开头的 `_audioStallGrace`（8s）
-      // 已经覆盖不到「确认窗口拉长到 12s」之后的那一段了，续一次免得刚恢复
-      // 就被判成「音频停摆」又叠一层自愈。
+      // `current-ao` / `audio-pts` 会短暂缺失；续一次免得刚恢复就被判成「音频停摆」。
       if (_playerCount != 0) {
         _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
       }
-      // 再补一次：`playing` 事件有时早于音频输出真正接上，
-      // 形成「画面在走、声音没有」；这里延迟一点再喊一次播放，代价极低。
-      // 已 dispose（_playerCount == 0）就不再挂这个定时器，免得 dispose 之后
-      // 又冒出一个 1200ms 的空转定时器。
+      // 检查音频输出是否正常挂载，若未挂载则立即调度一次音频重载
+      if (_playerCount != 0 && _hasAudioTrack()) {
+        final ao = _mpvProp('current-ao');
+        if (ao == 'no' || ao == 'null') {
+          _reloadAudioOutput();
+        }
+      }
+      // 兜底定时器：若 mpv 或状态仍停在暂停，再次拉起播放
       if (_playerCount != 0) {
-        _reloadWatchdog = Timer(const Duration(milliseconds: 1200), () {
+        _reloadWatchdog = Timer(const Duration(milliseconds: 1000), () {
           if (_playerCount == 0) return;
-          if (playerStatus.isPlaying) return;
-          _startPlayback();
+          if (!playerStatus.isPlaying || _mpvProp('pause') == 'yes') {
+            _startPlayback();
+          }
         });
       }
     }
@@ -1646,19 +1649,18 @@ class PlPlayerController with BlockConfigMixin {
   ///   - 再把 `audio-device` 写回当前值：手册（input.rst）明确写「写入该属性会
   ///     把音频输出**调度为重载**」，是让 AO 重新初始化的官方途径。
   ///     注意它「在 AO 未激活时不会自动启用音频」—— 所以两者都发，
-  ///     单靠后者救不了「AO 根本没挂上」的情况。
+  ///     无论当前设备是否为 auto（默认多为 auto），重写该属性均能促使 mpv 重新探测
+  ///     Windows 系统的 WASAPI 音频终端。
   ///
   /// 两者都**完全不动播放位置**，所以误判的代价只是一次无声的 AO 重建。
   void _reloadAudioOutput() {
     final device = _mpvProp('audio-device');
     _mpvCommand(const ['audio-reload']);
-    if (device != null && device.isNotEmpty && device != 'auto') {
-      final player = _videoPlayerController;
-      if (player is NativePlayer) {
-        try {
-          player.setProperty('audio-device', device);
-        } catch (_) {}
-      }
+    final player = _videoPlayerController;
+    if (player is NativePlayer) {
+      try {
+        player.setProperty('audio-device', (device == null || device.isEmpty) ? 'auto' : device);
+      } catch (_) {}
     }
   }
 
@@ -2160,11 +2162,12 @@ class PlPlayerController with BlockConfigMixin {
   // 就是不播」正好是这个症状。
   //
   // 所以这里优先用回调（它会顺带补注册监听器），回调缺失时直接操作播放器兜底。
-  void _startPlayback() {
+  Future<void> _startPlayback() async {
+    _userPaused = false;
     if (_playCallBack == null) {
-      play();
+      await play();
     } else {
-      playIfExists();
+      await playIfExists();
     }
   }
 
