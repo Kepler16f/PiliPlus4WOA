@@ -1171,7 +1171,7 @@ packages:
     description:
       path: media_kit
       ref: "version_1.2.5"
-      resolved-ref: "6103b880451aa724caa5f8652cb0585baa1b0191"
+      resolved-ref: "e88698e27fd8b049061e4e246d8474385c8e70f6"
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.1.11"
@@ -1214,7 +1214,7 @@ packages:
     description:
       path: "libs/universal/media_kit_libs_video"
       ref: "version_1.2.5"
-      resolved-ref: "6103b880451aa724caa5f8652cb0585baa1b0191"
+      resolved-ref: "e88698e27fd8b049061e4e246d8474385c8e70f6"
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.5"
@@ -1223,7 +1223,7 @@ packages:
     description:
       path: "libs/windows/media_kit_libs_windows_video"
       ref: "version_1.2.5"
-      resolved-ref: "6103b880451aa724caa5f8652cb0585baa1b0191"
+      resolved-ref: "e88698e27fd8b049061e4e246d8474385c8e70f6"
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.10"
@@ -1232,7 +1232,7 @@ packages:
     description:
       path: media_kit_native_event_loop
       ref: "version_1.2.5"
-      resolved-ref: "6103b880451aa724caa5f8652cb0585baa1b0191"
+      resolved-ref: "e88698e27fd8b049061e4e246d8474385c8e70f6"
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.0.9"
@@ -1241,7 +1241,7 @@ packages:
     description:
       path: media_kit_video
       ref: "version_1.2.5"
-      resolved-ref: "6103b880451aa724caa5f8652cb0585baa1b0191"
+      resolved-ref: "e88698e27fd8b049061e4e246d8474385c8e70f6"
       url: "https://github.com/Kepler16f/media-kit.git"
     source: git
     version: "1.2.5"
