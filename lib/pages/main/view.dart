@@ -153,7 +153,8 @@ class _MainAppState extends PopScopeState<MainApp>
 
   @override
   Future<void> onWindowMoved() async {
-    if (PlPlayerController.instance?.isDesktopPip ?? false) {
+    // PiP 时不改主窗口记忆，只把 PiP 窗口当前位置记下来（#2997 窗口记忆）。
+    if (PlPlayerController.instance?.updatePipBounds() ?? false) {
       return;
     }
     final Offset offset = await windowManager.getPosition();
@@ -162,7 +163,7 @@ class _MainAppState extends PopScopeState<MainApp>
 
   @override
   Future<void> onWindowResized() async {
-    if (PlPlayerController.instance?.isDesktopPip ?? false) {
+    if (PlPlayerController.instance?.updatePipBounds() ?? false) {
       return;
     }
     final Rect bounds = await windowManager.getBounds();
