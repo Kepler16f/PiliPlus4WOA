@@ -89,8 +89,9 @@ $headerPath = Join-Path $videoDir "angle_surface_manager.h"
 $anglePath = Join-Path $videoDir "angle_surface_manager.cc"
 $videoPath = Join-Path $videoDir "video_output.cc"
 $videoHeaderPath = Join-Path $videoDir "video_output.h"
+$utilsPath = Join-Path $videoDir "utils.cc"
 
-foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath)) {
+foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath, $utilsPath)) {
     if (-not (Test-Path $p)) { throw "missing source file: $p" }
 }
 
@@ -667,6 +668,25 @@ $NewVideoOutputDtor = @'
 }
 '@
 
+# Windows 26H2: rcNormalPosition is stale once the shell reports a work-area
+# change, so exiting native fullscreen restored the window shifted up by one
+# taskbar height (upstream PiliPlus #2901, fixed in bggRGjQaUbCoE/media-kit
+# fd8421d21 by reading the window rect at the moment of entering instead).
+$OldFullscreenRect = @'
+    ::GetWindowPlacement(window, &placement);
+    rect_before_fullscreen_ = RECT{
+        placement.rcNormalPosition.left,
+        placement.rcNormalPosition.top,
+        placement.rcNormalPosition.right,
+        placement.rcNormalPosition.bottom,
+    };
+'@
+
+$NewFullscreenRect = @'
+    ::GetWindowPlacement(window, &placement);
+    ::GetWindowRect(window, &rect_before_fullscreen_);
+'@
+
 $edits = @(
     @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
     @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
@@ -683,14 +703,15 @@ $edits = @(
     @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
     @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
     @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" },
-    @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" }
+    @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" },
+    @{ file = $utilsPath; old = $OldFullscreenRect; new = $NewFullscreenRect;                label = "utils.cc: EnterNativeFullscreen must use GetWindowRect (26H2 taskbar-height shift)" }
 )
 
 
 
 # ---- pass 1: verify every anchor BEFORE writing anything -----------------
 $states = @{}
-foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath)) {
+foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath, $utilsPath)) {
     $states[$p] = Get-Normalized $p
 }
 # 锚点也要统一成 LF：本脚本在 Windows 上是 CRLF，here-string 里的换行因此是 CRLF，
