@@ -410,9 +410,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   // 根因（读 C:/flutter SDK 确证）：Windows 触控偶发**只发 PointerRemoved、
   // 不发对应的 up/cancel**（驱动层 WM_POINTERLEAVE；或手势仲裁抢占后 up 被吞，
   // 而识别器对自家指针的 up 依赖 hit-test 派发，偶发错序就丢）。而框架里
-  // PointerRemovedEvent **只走 pointerRouter、从不进识别器**（binding.dart
-  // `_handlePointerEventImmediately`：它连 hitTestResult 都不带，dispatchEvent
-  // 里只 route 给全局/每指针路由）。于是：
+  // Removed 不走 hit-test（binding 的 dispatchEvent 对它只调 pointerRouter.route）：
+  // 仍在跟踪该指针的识别器能经每指针路由收到，但**没有任何核心识别器处理
+  // Removed 分支**（Scale 甚至 stopTrackingIfPointerNoLongerDown 都不认它）→
+  // 状态永远不清；没在跟踪的识别器则完全收不到。于是：
   //   - ScaleGestureRecognizer：`_velocityTrackers[p]`/`_pointerLocations[p]`
   //     残留 → 同 id 的后续事件命中 `_velocityTrackers[...]!` null 断言、或
   //     primary/焦点被幽灵拉偏 → 这一轮所有手势全灭（长按起不来、滑动方向
