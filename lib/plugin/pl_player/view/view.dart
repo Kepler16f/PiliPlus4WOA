@@ -392,6 +392,108 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       ),
       trackpadScrollCausesScale: false,
     );
+
+    // 触控闩死的总兜底（ARM64 修改版 2026-10-12，诊断见 _onLostPointerGuard）：
+    // 全局路由先于 hit-test 分发执行（sky_engine binding：dispatchEvent 里
+    // pointerRouter.route 在 entry.target.handleEvent 之前；arena 的 close/sweep
+    // 更在其后），所以这里收到的 down 一定还没被任何识别器处理过。
+    GestureBinding.instance.pointerRouter.addGlobalRoute(
+      _onLostPointerGuard,
+    );
+  }
+
+  // ── 触控幽灵指针守卫（ARM64 修改版 2026-10-12）────────────────────────
+  //
+  // 症状：触控「大部分时候是好的，有时长按倍速/点击进入/上下滑动整体失灵，
+  // 退出重进才好」。
+  //
+  // 根因（读 C:/flutter SDK 确证）：Windows 触控偶发**只发 PointerRemoved、
+  // 不发对应的 up/cancel**（驱动层 WM_POINTERLEAVE；或手势仲裁抢占后 up 被吞，
+  // 而识别器对自家指针的 up 依赖 hit-test 派发，偶发错序就丢）。而框架里
+  // PointerRemovedEvent **只走 pointerRouter、从不进识别器**（binding.dart
+  // `_handlePointerEventImmediately`：它连 hitTestResult 都不带，dispatchEvent
+  // 里只 route 给全局/每指针路由）。于是：
+  //   - ScaleGestureRecognizer：`_velocityTrackers[p]`/`_pointerLocations[p]`
+  //     残留 → 同 id 的后续事件命中 `_velocityTrackers[...]!` null 断言、或
+  //     primary/焦点被幽灵拉偏 → 这一轮所有手势全灭（长按起不来、滑动方向
+  //     判定失效）；
+  //   - ImmediateTapGestureRecognizer：`_activePointer` 残留 → isPointerAllowed
+  //     永远 false → 点击进入失效（识别器侧另有自愈兜底，见该类）；
+  //   - MultiTap/PrimaryPointer(LongPress)：_trackers/_primaryPointer 同理，
+  //     幽灵指针压住 primary 后**新的 down 不再是 primary** → 长按永久失灵。
+  // 鼠标几乎不发 removed，所以同一套代码「鼠标一直好、触控偶发全废」。
+  //
+  // 做法：识别器只可能通过 `_onPointerDown` 拿到指针（addPointer），所以
+  // ① 在那最前面清扫：有登记、却已 ≥1.2s 没有任何下落的新 down 到来 → 认定
+  //    驱动把它丢了，**合成 cancel** 发给各识别器，让它们走正规收尾路径，
+  //    再把当前 down 正常喂进去（cancel-旧 → down-新 与真实事件流等价）；
+  // ② 全局路由记账 up/cancel（收尾），并当场处理 PointerRemoved —— 它是唯一
+  //    能第一时间看到 removed 的钩子（识别器永远收不到它）。
+  final Map<int, ({Duration at, ui.PointerDeviceKind kind})> _downPointers = {};
+  static const Duration _lostPointerGrace = Duration(milliseconds: 1200);
+
+  void _sweepLostPointers(Duration now, int currentPointer) {
+    for (final e in _downPointers.entries.toList()) {
+      if (e.key == currentPointer) continue;
+      if (now - e.value.at > _lostPointerGrace) {
+        _releasePointer(e.key, e.value.at, e.value.kind);
+      }
+    }
+  }
+
+  void _onLostPointerGuard(PointerEvent event) {
+    if (event is PointerDownEvent) {
+      _downPointers[event.pointer] = (at: event.timeStamp, kind: event.kind);
+    } else if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _downPointers.remove(event.pointer);
+    } else if (event is PointerMoveEvent) {
+      // 有 move 就说明这根指针还活着（双指缩放第一指按住 1.2s 是常事），
+      // 刷新时间戳，别把它当幽灵清扫。
+      final rec = _downPointers[event.pointer];
+      if (rec != null) {
+        _downPointers[event.pointer] = (at: event.timeStamp, kind: rec.kind);
+      }
+    } else if (event is PointerRemovedEvent) {
+      // 驱动明说这根指针没了、却没给 up/cancel：这就是「幽灵」本身，
+      // 立即补发 cancel，让识别器当场复活（不用等下一次按下）。
+      final rec = _downPointers[event.pointer];
+      if (rec != null) {
+        _releasePointer(event.pointer, rec.at, rec.kind);
+      }
+    }
+  }
+
+  void _releasePointer(
+    int pointer,
+    Duration timeStamp,
+    ui.PointerDeviceKind kind,
+  ) {
+    _downPointers.remove(pointer);
+    // 不直接调识别器的 handleEvent（那是 OneSequence 的 @protected 方法，
+    // DoubleTap 的收事件口甚至是私有 tracker 路由）—— 把这些识别器拉到
+    // pointerRouter 上重新注入 cancel：凡是还在跟踪该指针的路由（tap/scale/
+    // longPress/doubleTap tracker，乃至 PiP 拖动的 route）都会按正规路径收到
+    // 并各自收尾；没人跟踪时 route() 就是空操作。
+    try {
+      GestureBinding.instance.pointerRouter.route(
+        PointerCancelEvent(pointer: pointer, timeStamp: timeStamp, kind: kind),
+      );
+    } catch (e, s) {
+      // 识别器对越界事件可能自行 assert/拒收：宁可放过这一次复活，
+      // 也不能让守卫把派发炸了。留下证据方便下次诊断。
+      Utils.reportError('touch guard: cancel replay failed: $e', s);
+    }
+    // 长按若已经触发（框架 _longPressAccepted），补发的 cancel 走
+    // onLongPressCancel/onLongPressEnd 之外还可能根本不回调 —— 倍速旗标是
+    // 我们自己在 onLongPressStart 里置的。这里显式释放（幂等：没在长按时
+    // setLongPressStatus 直接 return），否则 2 倍速会永远卡住。
+    if (plPlayerController.longPressStatus.value) {
+      unawaited(plPlayerController.setLongPressStatus(false));
+    }
+    Utils.reportError(
+      'touch guard: synthesized cancel for lost pointer $pointer',
+      null,
+    );
   }
 
   @override
@@ -438,6 +540,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   @override
   void dispose() {
     removeObserverMobile(this);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(
+      _onLostPointerGuard,
+    );
     _stopPipDrag();
     _danmakuListener?.cancel();
     _tapGestureRecognizer.dispose();
@@ -1433,6 +1538,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    // 幽灵指针清扫（见 _onLostPointerGuard 的注释）：必须在把当前 down 喂给
+    // 任何识别器**之前**做 —— 上一根被驱动吞掉收尾事件的指针若不先合成
+    // cancel 请出去，scale/tap/长按里残留的 primary 会把这一轮手势整个吃掉。
+    _sweepLostPointers(event.timeStamp, event.pointer);
+
     if (PlatformUtils.isDesktop) {
       final buttons = event.buttons;
       final isSecondaryBtn = buttons == kSecondaryMouseButton;

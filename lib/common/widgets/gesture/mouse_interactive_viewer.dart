@@ -93,9 +93,15 @@ class _MouseInteractiveViewerState extends State<MouseInteractiveViewer>
   double _currentRotation = 0.0;
   _GestureType? _gestureType;
 
-  static final gestureSettings = DeviceGestureSettings(
-    touchSlop: Platform.isIOS ? 9 : 4,
-  );
+  static final gestureSettings = Platform.isWindows
+      // Windows 桌面 + 触控（ARM64 修改版 2026-10-12）：不设 touchSlop，
+      // 回退框架默认（computePanSlop：mouse 2px / touch 36px）。
+      // 原先写死的 4px **只作用于 touch/stylus/trackpad**（mouse 走固定的
+      // kPrecisePointer*），手指点按天然漂移 >4px → scale 抢先赢下竞技场，
+      // 长按（要撑 500ms）与 tap（还没抬起就被判成拖动）就此夭折 ——
+      // 「鼠标都正常、触控偶发失灵」的形状正来源于此。
+      ? null
+      : DeviceGestureSettings(touchSlop: Platform.isIOS ? 9 : 4);
 
   late final ScaleGestureRecognizer _scaleGestureRecognizer;
 
