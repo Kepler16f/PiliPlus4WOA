@@ -902,22 +902,27 @@ class PlPlayerController with BlockConfigMixin {
     // 路径不存在；同时 thread_count 保持默认（多线程），切片线程/ dav1d
     // 内部线程照常工作，不会出现跑不动的单线程软解。
     // 注意不要设置 vd-lavc-threads / hwdec-threads，否则又会把线程数压到 1。
-    // 若出现卡顿可在「设置 → 视频」中关闭该项。
+    // 若出现闪退可在「设置 → 视频」中重新打开该项（2026-10-14 起默认关闭：
+    // 触发崩溃的帧线程 bug 属于 2026-09 期 libmpv 构建，现已升级）。
     if (Pref.disableFrameThreading) {
       opt['vd-lavc-o'] = 'thread_type=slice';
-      // 关键配套：别让 mpv 因为几帧坏数据就把硬件解码器降级为软件解码。
-      //
-      // mpv 默认在「连续 3 次解码失败」后判定硬解失效并切到下一个解码方式
-      // （最终是软解），见 mpv vd_lavc.c: handle_err() 累加 hwdec_fail_count，
-      // 达到 hwdec_opts->software_fallback（默认 3）即置 hwdec_failed 触发
-      // force_fallback()。CDN 断流只要产生几帧坏数据（日志里的
-      // Invalid NAL unit size / Error splitting the input into NAL units）
-      // 就足以触发——实测的坏包会连续产生 3~6 个解码错误，正好踩线。
-      // 放宽到 30（约 30fps 下 1 秒的连续错误）：偶发坏包不再触发降级，坏帧
-      // 被丢弃、等到关键帧自然恢复；硬件解码器真的坏掉时（持续错误）仍会在
-      // 约 1 秒后降级兜底。硬解在初始化阶段失败不受影响（那条路径正常回退）。
-      opt['hwdec-software-fallback'] = '30';
     }
+
+    // 别让 mpv 因为几帧坏数据就把硬件解码器降级为软件解码。
+    //
+    // 与帧线程开关**解耦**（2026-10-14）：它过去长在同一个 if 里，于是「默认
+    // 关闭帧线程禁用」会顺带把这条保护也关掉 —— 但它的目的和帧线程无关。
+    //
+    // mpv 默认在「连续 3 次解码失败」后判定硬解失效并切到下一个解码方式
+    // （最终是软解），见 mpv vd_lavc.c: handle_err() 累加 hwdec_fail_count，
+    // 达到 hwdec_opts->software_fallback（默认 3）即置 hwdec_failed 触发
+    // force_fallback()。CDN 断流只要产生几帧坏数据（日志里的
+    // Invalid NAL unit size / Error splitting the input into NAL units）
+    // 就足以触发——实测的坏包会连续产生 3~6 个解码错误，正好踩线。
+    // 放宽到 30（约 30fps 下 1 秒的连续错误）：偶发坏包不再触发降级，坏帧
+    // 被丢弃、等到关键帧自然恢复；硬件解码器真的坏掉时（持续错误）仍会在
+    // 约 1 秒后降级兜底。硬解在初始化阶段失败不受影响（那条路径正常回退）。
+    opt['hwdec-software-fallback'] = '30';
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
@@ -1447,17 +1452,89 @@ class PlPlayerController with BlockConfigMixin {
   ///
   /// 代价最低的「恢复画面」手段也是它：整条路径**完全不动播放位置**，
   /// 所以即使误判（例如画面本来就是一帧静止画面）也只是白白重建一次表面。
+  ///
+  /// 尺寸选择（ARM64 修改版 2026-10-14）：**不再恒等于片源尺寸**，而是跟随
+  /// 实际显示区域（[_displayBox]）按阶梯降采样。
+  /// 实机证据（PiP 卡顿）：`rect=0,0,1920x1080` 而 PiP 窗口只有 280px —— 旧写法
+  /// 让 mpv 每帧仍按 1080p 渲染，而 `hwdec-current=d3d11va-copy`（ANGLE/GL 输出
+  /// 下拿不到零拷贝）意味着每帧还要 GPU→CPU 回读 + 上传，ARM64 上这份开销就是
+  /// 「小窗/后台播放卡顿、与网络无关」的来源；帧级追踪也显示这段时间
+  /// `draw/mark` 在涨而 `cb=0`（引擎根本没来取帧）。
+  /// 阶梯量化（而非逐像素跟随）是为了：拖动窗口时不会每帧重建表面/纹理。
+  /// 宽高比保持方式：两个维度乘同一个系数，只有取整带来的 ≤1px 误差 ——
+  /// 绝不能各自独立取显示框的宽高，否则 mpv 会把画面画进错比例的 FBO（变形）。
+  static const List<double> _surfaceScaleSteps = [
+    1.0,
+    0.75,
+    0.5,
+    0.35,
+    0.25,
+  ];
+  Size? _displayBox;
+  double _displayBoxDpr = 1.0;
+
+  /// 由播放视图在 build 时回传「视频区域多大」。
+  /// 只在真的变了时才重算并下发，避免每帧 build 引发表面重建。
+  void setDisplayBox(Size box, double devicePixelRatio) {
+    final dpr = devicePixelRatio <= 0 ? 1.0 : devicePixelRatio;
+    final old = _displayBox;
+    if (old != null &&
+        old.width == box.width &&
+        old.height == box.height &&
+        _displayBoxDpr == dpr) {
+      return;
+    }
+    _displayBox = box;
+    _displayBoxDpr = dpr;
+    // 尺寸变化后立刻校正一次（不等看门狗的 2s 周期），但**不**走 force：
+    // 常规缩放不需要「强制重建」语义，只要下发的值和上次不同即可生效。
+    unawaited(_applyVideoOutputSize());
+  }
+
+  /// 目标倍率：显示区域所需的倍率，**向上**取整到阶梯里不小于它的最小一档
+  /// （保证表面 ≥ 显示像素，不糊），并且永远 ≤ 1.0（不用小窗去放大片源）。
+  double _targetSurfaceScale(int dw, int dh) {
+    final box = _displayBox;
+    if (box == null || box.width < 1 || box.height < 1) return 1.0;
+    final needed = min(
+      box.width * _displayBoxDpr / dw,
+      box.height * _displayBoxDpr / dh,
+    );
+    if (needed >= 1.0) return 1.0;
+    // 升序找第一个 >= needed 的档位（阶梯是降序声明的，所以反向遍历）。
+    for (final step in _surfaceScaleSteps.reversed) {
+      if (step >= needed) return step;
+    }
+    return 1.0;
+  }
+
   Future<void> _applyVideoOutputSize({bool force = false}) async {
     final ctr = _videoController;
     if (ctr == null) return;
-    final w = _intProp('video-out-params/dw');
-    final h = _intProp('video-out-params/dh');
-    if (w == null || h == null || w < 1 || h < 1) return;
+    final srcW = _intProp('video-out-params/dw');
+    final srcH = _intProp('video-out-params/dh');
+    if (srcW == null || srcH == null || srcW < 1 || srcH < 1) return;
+    final scale = _targetSurfaceScale(srcW, srcH);
+    // 偶数化：D3D/ANGLE 对纹理尺寸有对齐要求，mpv 侧也按偶数处理更稳。
+    int even(double v) {
+      final r = v.round() & ~1;
+      return r < 2 ? 2 : r;
+    }
+
+    final w = even(srcW * scale);
+    final h = even(srcH * scale);
     if (!force && _appliedSurfaceWidth == w && _appliedSurfaceHeight == h) {
       return;
     }
     _appliedSurfaceWidth = w;
     _appliedSurfaceHeight = h;
+    // 窗口尺寸变化触发的表面重建（非 force 路径 = 由 setDisplayBox 驱动，例如
+    // 进/出 PiP、拖动窗口）：重建的那一两帧画面像素本就可能与上一帧相同，
+    // 给冻结判定一个与「用户拖动进度条」同级别的冷却，免得刚缩放完就被误判
+    // 成冻结、升级成真·重开（拆建 AO/解码器/表面），反而制造卡顿。
+    if (!force) {
+      _lastPictureResyncAt = DateTime.now();
+    }
     try {
       if (force) {
         // dart 侧 setSize 有「与上次相同就跳过」的缓存，先置空强制下发一次，

@@ -278,10 +278,15 @@ abstract final class Pref {
   /// 注意：只关帧线程、**不**压缩解码线程数（实现见 PlPlayerController._initPlayer：
   /// 用 libavcodec 的 `thread_type=slice`）。早先把 vd-lavc-threads 设为 1 会让
   /// 软解退化成单线程，AV1 等只能软解的片源跟不上，表现为「画面卡住、声音继续」。
-  /// 默认在 Windows 上开启（WOA 为目标平台）；受影响时可随时关闭。
+  ///
+  /// **2026-10-14 默认值翻转：`Platform.isWindows` → `false`（默认不禁用）。**
+  /// 依据：该 bug 属于 2026-09 期 libmpv 构建（用户按 2026-10-12 确认），libmpv
+  /// 已升到 zhongfly 2026-10-11（mpv v0.41.0-1127 + 同期 ffmpeg）。保留本设置
+  /// 作为逃生口：若「播放一段时间后闪退」复现，到「设置 → 视频」重新打开。
+  /// 注意 `hwdec-software-fallback` 与本开关无关，已拆出为无条件生效（见 _initPlayer）。
   static bool get disableFrameThreading => _setting.get(
     SettingBoxKey.disableFrameThreading,
-    defaultValue: Platform.isWindows,
+    defaultValue: false,
   );
 
   /// 用户选择的视频同步方式（设置页「视频同步」）。

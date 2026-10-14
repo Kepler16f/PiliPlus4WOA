@@ -1650,6 +1650,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   Widget build(BuildContext context) {
     maxWidth = widget.maxWidth;
     maxHeight = widget.maxHeight;
+    // 把「视频区域实际多大 + 设备像素比」告诉控制器：渲染表面按这个尺寸
+    // 降采样（PiP/小窗时不再按片源尺寸全量渲染回读，见 _applyVideoOutputSize）。
+    // 放在 build 里而不是 addPostFrameCallback：窗口尺寸变化必然伴随 build，
+    // 且 setDisplayBox 自己做了「没变就不下发」的短路。
+    if (PlatformUtils.isDesktop) {
+      plPlayerController.setDisplayBox(
+        Size(maxWidth, maxHeight),
+        MediaQuery.devicePixelRatioOf(context),
+      );
+    }
     final isFullScreen = this.isFullScreen;
     final primary = isFullScreen && colorScheme.isLight
         ? colorScheme.inversePrimary
@@ -2405,6 +2415,22 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     // 缓冲时必须跳过：实机日志里有一次触发就是 buffering=true / vf-fps=null
     // （缓存空了、mpv 根本没在出帧），那种情况画面当然不动，但真正该做的是
     // 等缓冲/走既有的断流重连，而不是去动播放位置。
+    //
+    // 也没有可见视图时必须跳过（ARM64 修改版 2026-10-14，后台播放卡顿的一部分）：
+    // 窗口被隐藏/最小化时合成器不再更新，toImage 拿到的永远是同一张旧图 →
+    // 像素必然「不变」，于是每 1s 误报一次冻结、按阶梯升级成真·重开（重开要
+    // 拆建 AO + 解码器 + ANGLE 表面），后台播放就这么被反复自愈空转拖卡。
+    // 判据与看门狗里的 `noVisibleView` 完全一致 —— **只排除 hidden/paused/
+    // detached**；桌面 `inactive` 是「可见但没焦点」（PiP 就常在这态），画面
+    // 该动，绝不能一起挡掉（那是当年「前台播放也会卡住」的成因）。
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == AppLifecycleState.hidden ||
+        lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.detached) {
+      _unchangedFrameSamples = 0;
+      _lastFramePixels = null;
+      return;
+    }
     if (!plPlayerController.playerStatus.isPlaying ||
         plPlayerController.isSeeking.value ||
         plPlayerController.isBuffering.value ||

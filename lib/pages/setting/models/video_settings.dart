@@ -33,9 +33,9 @@ List<SettingsModel> get videoSettings => [
   ),
   SwitchModel(
     title: '禁用解码器帧线程',
-    subtitle: '修复 WoA 上播放一段时间后闪退（H.264 帧线程同步 bug）。'
-        '只关闭帧线程、保留多线程解码，并禁止中途降级到软解；'
-        '关闭此项会启用帧线程（更快，但可能闪退）。重新打开视频生效',
+    subtitle: '修复旧版 libmpv（2026-09 期构建）上播放一段时间后闪退'
+        '（H.264 帧线程同步 bug）。只关闭帧线程、保留多线程解码；'
+        'libmpv 已升级，故默认关闭。若闪退复现请重新打开。重新打开视频生效',
     leading: const Icon(Icons.memory_outlined),
     setKey: SettingBoxKey.disableFrameThreading,
     defaultVal: Pref.disableFrameThreading,
