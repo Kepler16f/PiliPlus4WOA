@@ -1413,8 +1413,15 @@ class PlPlayerController with BlockConfigMixin {
   //       重动作大约快一倍到达。之所以值得动冷却，是因为实机日志里第 1 级
   //       「重建输出表面」几乎救不回来（19 次冻结、18 次直接升级），真正有效的
   //       就是这一级重开。
+  //     - 2026-10-23 反向调长 3s → 5s（同时 view.dart 的采样判定 2 次 → 3 次）：
+  //       用户反馈「重建时间间隔太短，老是误杀」。合法静止（定帧/黑场/字幕卡）
+  //       每个采样周期都「完全相同」，冷却越短 → 单位时间内被拆掉 AO/解码器/
+  //       表面的次数越多，而重开本身就是一次可感知卡顿。1x 现在走到整链重开约
+  //       「探测 ~4s + 冷却 5s」≈ 9s；且冷却再乘 (1+本段已重开次数)，反复误杀会
+  //       自行稀疏到 10/15/20s 一档。真冻结的响应代价可控（历史上「16s 内收敛」
+  //       本就是可接受的设计点）。判定逻辑本身未动。
   // 下限不低于采样周期，避免同一个采样窗口里反复触发。
-  static const Duration _pictureResyncCooldown = Duration(seconds: 3);
+  static const Duration _pictureResyncCooldown = Duration(seconds: 5);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
   // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
@@ -1589,12 +1596,13 @@ class PlPlayerController with BlockConfigMixin {
     // 这时插一次自愈重开会把用户拖到的位置冲掉（也会让两个加载指示叠在一起）。
     if (now.difference(_lastUserSeekAt) < _userSeekGrace) return;
     final sinceLast = now.difference(_lastPictureResyncAt);
-    // 冷却按倍速与已重开次数缩放：base（1x=4s / 1.5x 以上=3s / 2x 以上=2s）
-    // × (1 + 本段已整链重建次数)，上限 4 倍。下限不低于采样周期（2s），
+    // 冷却按倍速与已重开次数缩放：base（1x=5s / 1.5x 以上=4s / 2x 以上=3s，
+    // 2026-10-23 随「老是误杀」的反馈整体调长一档）
+    // × (1 + 本段已整链重建次数)，上限 4 倍。下限不低于采样周期，
     // 否则会在同一个采样窗口里反复触发。
     final baseCooldown = _speedFactor >= 2.0
-        ? 2
-        : (_speedFactor > 1.5 ? 3 : _pictureResyncCooldown.inSeconds);
+        ? 3
+        : (_speedFactor > 1.5 ? 4 : _pictureResyncCooldown.inSeconds);
     final reloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
     final cooldown = Duration(seconds: baseCooldown * (1 + reloads));
     if (sinceLast < cooldown) return;
@@ -1613,8 +1621,9 @@ class PlPlayerController with BlockConfigMixin {
     _pictureFrozenDrops = drops;
 
     // 整链重建的门槛：倍速播放时前移。
-    // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建，
-    // 配合 4s 冷却，一次冻结大约 8s 内就能走到最重的那一级。
+    // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建。
+    // 2026-10-23：门槛不动，但采样判定多要一次、冷却加长到 5s，所以 1x 下一次冻结
+    // 约 9s（原 ~8s 且探测更短）才走到最重那一级 —— 误杀的代价比多等几秒更大。
     final escalateAt = _speedFactor > 1.5 ? 1 : 2;
     if (_pictureFrozenCount >= escalateAt || (dropsGrowing && _pictureFrozenCount > 2)) {
       _pictureFrozenCount = 0;

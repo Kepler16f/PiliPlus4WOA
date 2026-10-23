@@ -2360,7 +2360,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   //
   // 做法：按 _freezeSamplePeriod（现为 1s）把视频那一层 RepaintBoundary 以极低
   // 分辨率抓成一张小图（pixelRatio _freezeSampleScale = 0.05，只有几百字节），
-  // 与上一次比较；连续 _freezeSamplesToJudge（现为 2）次完全相同、且期间确实
+  // 与上一次比较；连续 _freezeSamplesToJudge（现为 3）次完全相同、且期间确实
   // 在播、不在跳转、不在重开，就判定为「画面冻结」，交给控制器处理。
   // 具体节拍与历史见下面那段注释；抓取分辨率极低，开销可以忽略。
   Timer? _freezeSampler;
@@ -2379,8 +2379,13 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   //     误判的代价只是白做一次，所以值得更早出手。
   //   - 判定后不清零计数（见 _samplePicture 里的说明），画面仍冻则每个采样周期
   //     （1s）再报一次，由 PlPlayerController.onPictureFrozen 的冷却与升级阶梯节流。
+  //   - 2026-10-23 判定 2 次 → 3 次（周期保持 1s）：用户反馈「重建时间间隔太短、
+  //     老是误杀」。定帧/黑场/字幕卡/静态 UGC 图这类**合法静止**每个周期都
+  //     「完全相同」，加一次判定 = 少一次无谓的拆建；探测时长
+  //     (3+1)×1s ≈ 4s（另加 0~1 个周期的相位偏移）。配合 controller.dart 的
+  //     _pictureResyncCooldown 3s→5s，1x 下一次冻结走到整链重开约 9s（原 ~6s）。
   static const Duration _freezeSamplePeriod = Duration(seconds: 1);
-  static const int _freezeSamplesToJudge = 2;
+  static const int _freezeSamplesToJudge = 3;
   static const double _freezeSampleScale = 0.05;
 
   void _startPictureFreezeSampler() {
