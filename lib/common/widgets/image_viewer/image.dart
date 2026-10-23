@@ -45,6 +45,7 @@ class Image extends StatefulWidget {
     required this.doubleTapGestureRecognizer,
     required this.horizontalDragGestureRecognizer,
     required this.onChangePage,
+    this.onTapBlank,
   });
 
   Image.network(
@@ -83,6 +84,7 @@ class Image extends StatefulWidget {
     required this.doubleTapGestureRecognizer,
     required this.horizontalDragGestureRecognizer,
     required this.onChangePage,
+    this.onTapBlank,
   }) : image = ResizeImage.resizeIfNeeded(
          cacheWidth,
          cacheHeight,
@@ -128,6 +130,7 @@ class Image extends StatefulWidget {
     required this.doubleTapGestureRecognizer,
     required this.horizontalDragGestureRecognizer,
     required this.onChangePage,
+    this.onTapBlank,
   }) : assert(
          !kIsWeb,
          'Image.file is not supported on Flutter Web. '
@@ -176,6 +179,7 @@ class Image extends StatefulWidget {
     required this.doubleTapGestureRecognizer,
     required this.horizontalDragGestureRecognizer,
     required this.onChangePage,
+    this.onTapBlank,
   }) : image = ResizeImage.resizeIfNeeded(
          cacheWidth,
          cacheHeight,
@@ -224,6 +228,7 @@ class Image extends StatefulWidget {
     required this.doubleTapGestureRecognizer,
     required this.horizontalDragGestureRecognizer,
     required this.onChangePage,
+    this.onTapBlank,
   }) : image = ResizeImage.resizeIfNeeded(
          cacheWidth,
          cacheHeight,
@@ -279,6 +284,10 @@ class Image extends StatefulWidget {
   final ValueChanged<ScaleUpdateDetails>? onDragUpdate;
   final ValueChanged<ScaleEndDetails>? onDragEnd;
   final ValueChanged<int>? onChangePage;
+
+  /// 单击图片以外「空白处」的回调，原样透传给 [Viewer]（判定在 Viewer 里做，
+  /// 因为只有它知道画面矩形）。为 null 时各处行为与原先一致。
+  final VoidCallback? onTapBlank;
 
   final DoubleTapGestureRecognizer doubleTapGestureRecognizer;
   final ImageHorizontalDragGestureRecognizer horizontalDragGestureRecognizer;
@@ -625,6 +634,7 @@ class _ImageState extends State<Image> with WidgetsBindingObserver {
       doubleTapGestureRecognizer: widget.doubleTapGestureRecognizer,
       horizontalDragGestureRecognizer: widget.horizontalDragGestureRecognizer,
       onChangePage: widget.onChangePage,
+      onTapBlank: widget.onTapBlank,
       child: RawImage(image: _imageInfo?.image),
     );
 

@@ -38,7 +38,6 @@ import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:cached_network_image_ce/cached_network_image.dart';
-import 'package:easy_debounce/easy_throttle.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:get/get.dart';
@@ -81,6 +80,10 @@ class _GalleryViewerState extends State<GalleryViewer>
   late final RxInt _currIndex;
   GlobalKey? _key;
   EdgeInsets? _padding;
+
+  /// 已经发起过退出。退出动画期间页面还在树上，手势可能再来一次，
+  /// 见 [_closeOnce]。
+  bool _closing = false;
 
   late bool _hasInit = false;
   Player? _player;
@@ -144,9 +147,11 @@ class _GalleryViewerState extends State<GalleryViewer>
     _pageController = PageController(initialPage: widget.initIndex);
 
     final gestureSettings = MediaQuery.maybeGestureSettingsOf(Get.context!);
-    _tapGestureRecognizer = TapGestureRecognizer()
-      // ..onTap = _onTap
-      ..gestureSettings = gestureSettings;
+    // 不再挂 onTap：关闭改由 Viewer 判定「点在空白处」（onTapBlank）。
+    // 旧写法要等 300ms 才挂上 onTap，且与双击缩放共用全局节流键 'VIEWER_TAP'
+    // —— 双击后 555ms 内的单击会被吞掉，这正是「很难退出」的成因。
+    _tapGestureRecognizer =
+        TapGestureRecognizer()..gestureSettings = gestureSettings;
     if (PlatformUtils.isDesktop) {
       _tapGestureRecognizer.onSecondaryTapUp = _showDesktopMenu;
     }
@@ -157,12 +162,6 @@ class _GalleryViewerState extends State<GalleryViewer>
     _longPressGestureRecognizer = LongPressGestureRecognizer()
       ..onLongPress = _onLongPress
       ..gestureSettings = gestureSettings;
-
-    Future.delayed(const Duration(milliseconds: 300), () {
-      if (mounted) {
-        _tapGestureRecognizer.onTap = _onTap;
-      }
-    });
 
     _animateController = AnimationController(
       duration: const Duration(
@@ -277,7 +276,7 @@ class _GalleryViewerState extends State<GalleryViewer>
 
     if (!_animateController.isDismissed) {
       if (_animateController.value > 0.2) {
-        Get.back();
+        _closeOnce();
       } else {
         _animateController.reverse();
       }
@@ -436,6 +435,7 @@ class _GalleryViewerState extends State<GalleryViewer>
           doubleTapGestureRecognizer: _doubleTapGestureRecognizer,
           horizontalDragGestureRecognizer: _horizontalDragGestureRecognizer,
           onChangePage: _onChangePage,
+          onTapBlank: _closeOnce,
         );
       case SourceType.networkImage:
         final isLongPic = item.isLongPic;
@@ -448,6 +448,7 @@ class _GalleryViewerState extends State<GalleryViewer>
           doubleTapGestureRecognizer: _doubleTapGestureRecognizer,
           horizontalDragGestureRecognizer: _horizontalDragGestureRecognizer,
           onChangePage: _onChangePage,
+          onTapBlank: _closeOnce,
           frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
             if (wasSynchronouslyLoaded) {
               return child;
@@ -474,6 +475,7 @@ class _GalleryViewerState extends State<GalleryViewer>
                   horizontalDragGestureRecognizer:
                       _horizontalDragGestureRecognizer,
                   onChangePage: _onChangePage,
+                  onTapBlank: _closeOnce,
                 );
                 // final isLongPic = item.isLongPic;
                 // return CachedNetworkImage(
@@ -512,6 +514,7 @@ class _GalleryViewerState extends State<GalleryViewer>
                   horizontalDragGestureRecognizer:
                       _horizontalDragGestureRecognizer,
                   onChangePage: _onChangePage,
+                  onTapBlank: _closeOnce,
                   child: FittedBox(
                     child: SimpleVideo(
                       controller: _videoController!,
@@ -525,12 +528,16 @@ class _GalleryViewerState extends State<GalleryViewer>
     return Hero(tag: '${item.url}${widget.tag}', child: child);
   }
 
-  void _onTap() {
-    EasyThrottle.throttle(
-      'VIEWER_TAP',
-      const Duration(milliseconds: 555),
-      Get.back,
-    );
+  /// 由 Viewer 判定「单击落在图片外的空白处」后回调（判定见 viewer.dart 的
+  /// _onBlankPointerUp）。点图片上不触发；双击缩放不受影响。
+  void _closeOnce() {
+    // 退出动画期间本页仍挂在树上，双击空白的第二下会再回调一次 —— 不加这道闸
+    // 就会把下面的页面一起弹掉。旧写法是用全局节流键 'VIEWER_TAP'（555ms）顺带
+    // 挡住了，但同一个键也被双击缩放用着，正常关闭的单击常被它吞掉（=「很难
+    // 退出」），所以改成按实例状态判，不再用全局键。
+    if (_closing || !mounted) return;
+    _closing = true;
+    Get.back();
   }
 
   void _onLongPress() {
