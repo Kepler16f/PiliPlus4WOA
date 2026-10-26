@@ -20,6 +20,7 @@ import 'dart:io' show File, Platform;
 import 'package:PiliPlus/common/widgets/colored_box_transition.dart';
 import 'package:PiliPlus/common/widgets/dialog/simple_dialog_option.dart';
 import 'package:PiliPlus/common/widgets/gesture/image_horizontal_drag_gesture_recognizer.dart';
+import 'package:PiliPlus/common/widgets/image_viewer/dismiss_controller.dart';
 import 'package:PiliPlus/common/widgets/image_viewer/image.dart';
 import 'package:PiliPlus/common/widgets/image_viewer/loading_indicator.dart';
 import 'package:PiliPlus/common/widgets/image_viewer/viewer.dart';
@@ -81,9 +82,7 @@ class _GalleryViewerState extends State<GalleryViewer>
   GlobalKey? _key;
   EdgeInsets? _padding;
 
-  /// 已经发起过退出。退出动画期间页面还在树上，手势可能再来一次，
-  /// 见 [_closeOnce]。
-  bool _closing = false;
+  final _dismissController = ImageViewerDismissController();
 
   late bool _hasInit = false;
   Player? _player;
@@ -531,13 +530,9 @@ class _GalleryViewerState extends State<GalleryViewer>
   /// 由 Viewer 判定「单击落在图片外的空白处」后回调（判定见 viewer.dart 的
   /// _onBlankPointerUp）。点图片上不触发；双击缩放不受影响。
   void _closeOnce() {
-    // 退出动画期间本页仍挂在树上，双击空白的第二下会再回调一次 —— 不加这道闸
-    // 就会把下面的页面一起弹掉。旧写法是用全局节流键 'VIEWER_TAP'（555ms）顺带
-    // 挡住了，但同一个键也被双击缩放用着，正常关闭的单击常被它吞掉（=「很难
-    // 退出」），所以改成按实例状态判，不再用全局键。
-    if (_closing || !mounted) return;
-    _closing = true;
-    Get.back();
+    // 只关闭本图片路由，且仅在实际退出后锁住重复回调。否则弹层或内部返回
+    // 消费了 pop 后，图片还在但关闭保护已锁住，后续点击便再也不能退出。
+    if (mounted) _dismissController.close(context);
   }
 
   void _onLongPress() {

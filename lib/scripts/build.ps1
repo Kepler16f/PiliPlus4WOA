@@ -11,7 +11,11 @@ try {
     # 于是 pubspec 里仍写合法的 2.1.4+<build>，对外用「2.1.4 + 此后缀」。
     # 现在跟随上游版本号，后缀留空（显示就是 2.1.4）；要区分本 fork 时
     # 改成 '_woa1' 这类即可。
-    $versionDisplaySuffix = ''
+    # 2.1.6_fix1：上游版本号仍是 2.1.6，本 fork 这轮是修 bug 的增量发布，所以
+    # 用显示后缀 _fix1 —— 应用「关于」页与安装包文件名都会显示 2.1.6_fix1，
+    # 而 pubspec 里保持合法的 2.1.6（下划线写不进 semver，且上面的正则会把它
+    # 静默截断成 2.1.6）。
+    $versionDisplaySuffix = '_fix1'
 
     $versionName = $null
 
