@@ -30,10 +30,10 @@ jobs:
           # which is ARM64 on this runner. So we install Flutter directly.
           cd C:\
           if (-not (Test-Path C:\flutter)) {
-             git clone --depth 1 --branch 3.47.2 https://github.com/flutter/flutter.git C:\flutter
+             git clone --depth 1 --branch 3.47.9 https://github.com/flutter/flutter.git C:\flutter
           } else {
              git -C C:\flutter fetch --tags
-             git -C C:\flutter checkout 3.47.2
+             git -C C:\flutter checkout 3.47.9
           }
           # Let Flutter bootstrap its native (arm64) Dart SDK:
           & C:\flutter\bin\flutter --version

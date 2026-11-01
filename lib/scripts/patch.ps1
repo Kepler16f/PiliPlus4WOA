@@ -5,8 +5,10 @@ param(
     [string]$platform = ""
 )
 
-git config --global user.name "ci"
-git config --global user.email "example@example.com"
+$env:GIT_AUTHOR_NAME = "ci"
+$env:GIT_AUTHOR_EMAIL = "example@example.com"
+$env:GIT_COMMITTER_NAME = "ci"
+$env:GIT_COMMITTER_EMAIL = "example@example.com"
 
 # TODO: remove
 # https://github.com/flutter/flutter/issues/182281
@@ -125,12 +127,18 @@ foreach ($revert in $reverts) {
 }
 
 foreach ($patch in $patches) {
-    git apply "$env:GITHUB_WORKSPACE/$patch"
+    $patchPath = "$env:GITHUB_WORKSPACE/$patch"
+    git apply --reverse --check $patchPath 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "$patch applied"
-    } else {
+        Write-Host "$patch already applied"
+        continue
+    }
+    git apply --check $patchPath
+    if ($LASTEXITCODE -ne 0) {
         throw "$LASTEXITCODE"
     }
+    git apply $patchPath
+    if ($LASTEXITCODE -ne 0) { throw "$LASTEXITCODE" }
 }
 
 Set-Location $env:GITHUB_WORKSPACE
@@ -158,54 +166,55 @@ $patches_material = @($ModalBarrierPatchMaterial, $NavigationDrawerPatchMaterial
                     $FABPatchMaterial, $TextFieldPatchMaterial, $ScaffoldPatchMaterial, $RefreshIndicatorPatchMaterial,
                     $TabsPatchMaterial)
 
-# WOA 修改版：本 fork 只构建 Windows，pub 缓存固定用 LOCALAPPDATA 下的路径。
-$PubCacheDir = "$env:LOCALAPPDATA/Pub/Cache"
-
-# 确保 flutter pub get 已经跑过：后续给 material_ui 和 media_kit_video 打补丁
-# 都依赖 pub cache 里有对应的包源码。CI 上如果 patch.ps1 跑在 pub get 之前，
-# 这里主动跑一次保证补丁能找到目标。
-if (-not (Test-Path "$PubCacheDir/hosted/pub.dev") -or -not (Test-Path ".dart_tool/package_config.json")) {
-    Write-Host "running flutter pub get before patching dependencies..."
-    flutter pub get
-}
-
-try {
-    $MaterialUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
-        Where-Object { $_.Name -like "material_ui-*" } |
-        Select-Object -Last 1
-
-    if ($MaterialUiDir) {
-        Remove-Item -Path $MaterialUiDir.FullName -Recurse -Force
-    }
-} catch {
-}
-
+# 解析当前 workspace 的依赖后，再通过 package_config 定位补丁目标。
+Write-Host "running flutter pub get before patching dependencies..."
 flutter pub get
 
-$MaterialUiDir = Get-ChildItem "$PubCacheDir/hosted/pub.dev" -Directory |
-    Where-Object { $_.Name -like "material_ui-*" } |
-    Select-Object -Last 1
+function Get-PackageDirectory([string]$packageName) {
+    $packageConfigPath = Join-Path $env:GITHUB_WORKSPACE ".dart_tool/package_config.json"
+    $packageConfig = Get-Content -LiteralPath $packageConfigPath -Raw | ConvertFrom-Json
+    $package = $packageConfig.packages | Where-Object { $_.name -eq $packageName } | Select-Object -First 1
+    if (-not $package) {
+        throw "$packageName missing from .dart_tool/package_config.json"
+    }
 
-if (-not $MaterialUiDir) {
-    throw "material_ui package not found in pub cache"
+    $rootUri = [System.Uri]$package.rootUri
+    if ($rootUri.IsAbsoluteUri) {
+        return $rootUri.LocalPath
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path (Split-Path $packageConfigPath) $package.rootUri))
 }
 
-Write-Host "material_ui dir: $($MaterialUiDir.FullName)"
+# Resolve material_ui from this workspace's package config instead of guessing
+# from the newest package directory in the shared pub cache.
+$MaterialUiDir = Get-PackageDirectory "material_ui"
+
+if (-not (Test-Path -LiteralPath $MaterialUiDir)) {
+    throw "material_ui package directory not found: $MaterialUiDir"
+}
+
+Write-Host "material_ui dir: $MaterialUiDir"
 
 Get-ChildItem -Path "$env:GITHUB_WORKSPACE/lib/scripts/material" -Filter *.patch | ForEach-Object {
     (Get-Content $_.FullName -Raw) -replace "`r`n", "`n" |
         Set-Content -NoNewline $_.FullName
 }
 
-cd $MaterialUiDir.FullName
+cd $MaterialUiDir
 
 foreach ($patch in $patches_material) {
-    git apply "$env:GITHUB_WORKSPACE/$patch"
+    $patchPath = "$env:GITHUB_WORKSPACE/$patch"
+    git apply --reverse --check $patchPath 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "$patch applied"
-    } else {
+        Write-Host "$patch already applied"
+        continue
+    }
+    git apply --check $patchPath
+    if ($LASTEXITCODE -ne 0) {
         throw "$LASTEXITCODE"
     }
+    git apply $patchPath
+    if ($LASTEXITCODE -ne 0) { throw "$LASTEXITCODE" }
 }
 
 # WOA 修改版：给 media_kit_video 的 Windows 原生渲染路径打补丁
@@ -222,4 +231,3 @@ try {
 } catch {
     throw "patch_media_kit_video.ps1 failed: $_"
 }
-
