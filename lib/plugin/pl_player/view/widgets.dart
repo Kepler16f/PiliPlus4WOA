@@ -399,7 +399,7 @@ class _VideoTime extends LeafRenderObjectWidget {
     covariant _RenderVideoTime renderObject,
   ) {
     renderObject
-      ..fontSize = MediaQuery.textScalerOf(context).scale(_fontSize)
+      ..setFontSize(MediaQuery.textScalerOf(context).scale(_fontSize))
       ..position = position
       ..duration = duration;
   }
@@ -407,16 +407,16 @@ class _VideoTime extends LeafRenderObjectWidget {
 
 class _RenderVideoTime extends RenderBox {
   _RenderVideoTime({
-    required double fontSize,
+    required this.fontSize,
     required this._position,
     required this._duration,
-  }) : _fontSize = fontSize;
+  });
 
-  double _fontSize;
+  double fontSize;
 
-  set fontSize(double value) {
-    if (_fontSize == value) return;
-    _fontSize = value;
+  void setFontSize(double value) {
+    if (fontSize == value) return;
+    fontSize = value;
     _cache?.dispose();
     _cache = null;
     markNeedsLayout();
@@ -427,7 +427,7 @@ class _RenderVideoTime extends RenderBox {
   set duration(String value) {
     if (_duration == value) return;
     _duration = value;
-    final paragraph = _buildParagraph(_durationColor, _duration, _fontSize);
+    final paragraph = _buildParagraph(_durationColor, _duration, fontSize);
     if (paragraph.maxIntrinsicWidth != _cache?.maxIntrinsicWidth) {
       markNeedsLayout();
     } else {
@@ -481,7 +481,7 @@ class _RenderVideoTime extends RenderBox {
     final paragraph = _cache ??= _buildParagraph(
       _durationColor,
       _duration,
-      _fontSize,
+      fontSize,
     );
     return Size(paragraph.maxIntrinsicWidth, paragraph.height * 2);
   }
@@ -501,7 +501,7 @@ class _RenderVideoTime extends RenderBox {
 
   @override
   void paint(PaintingContext context, ui.Offset offset) {
-    final para = _buildParagraph(_positionColor, _position, _fontSize);
+    final para = _buildParagraph(_positionColor, _position, fontSize);
     context.canvas
       ..drawParagraph(
         para,

@@ -737,6 +737,7 @@ class PlPlayerController with BlockConfigMixin {
       _pipelineReadyTicks = -1;
       _pictureFrozenDrops = null;
       _pictureFrozenCount = 0;
+      _pictureSurfaceRefreshCount = 0;
       _resetStallWatchdogProgress();
       // 换片源 → 重新开始「音频停摆」判定的宽限期（见 _audioStallGraceUntil）：
       // 新片源刚 open，AO 还没挂上、audio-pts 还是 null，不能当成停摆。
@@ -1424,6 +1425,10 @@ class PlPlayerController with BlockConfigMixin {
   static const Duration _pictureResyncCooldown = Duration(seconds: 5);
   // 短时间内连续冻结算同一次事故；隔久了重新计数。
   int _pictureFrozenCount = 0;
+  // 本次事故里「只重建输出表面」（不做整链重开）已经做过几次。
+  // 用来给静态画面兜底：没有丢帧证据时最多重建一次，之后只记日志、
+  // 不再动播放位置，避免反复拆建表面把正常播放搅乱。
+  int _pictureSurfaceRefreshCount = 0;
   // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
   // 每做一次就按倍数拉长下一次的冷却间隔 —— 否则在倍速播放下渲染链持续吃紧时，
   // 会变成「刚重开完又冻结 → 又重开」的抖动，比卡住更难用。
@@ -1612,6 +1617,7 @@ class PlPlayerController with BlockConfigMixin {
     if (sinceLast > _stallEpisodeResetAfter) {
       _pictureFrozenCount = 0;
       _pictureReloadCount = 0;
+      _pictureSurfaceRefreshCount = 0;
     }
     _pictureFrozenCount++;
 
@@ -1624,8 +1630,15 @@ class PlPlayerController with BlockConfigMixin {
     // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建。
     // 2026-10-23：门槛不动，但采样判定多要一次、冷却加长到 5s，所以 1x 下一次冻结
     // 约 9s（原 ~8s 且探测更短）才走到最重那一级 —— 误杀的代价比多等几秒更大。
+    // 整链重建只在有硬证据时允许：vo-drop 上涨说明 mpv 已经产出帧却送不出去，
+    // 这才是渲染链真的卡住。
+    //
+    // 没有丢帧证据时，画面不变更可能是视频本来就是静止画面（定帧、字幕卡、
+    // 片尾、黑场）。这种误判的代价是一次整链重开：拆 AO + 解码器 + 表面，
+    // 用户会看到进度被冲掉、缓冲指示重来一次，而且短时间内还会再冻再杀。
+    // 所以下面那条分支只做一次非破坏性的表面重建，绝不整链重开、绝不 seek。
     final escalateAt = _speedFactor > 1.5 ? 1 : 2;
-    if (_pictureFrozenCount >= escalateAt || (dropsGrowing && _pictureFrozenCount > 2)) {
+    if (dropsGrowing && _pictureFrozenCount >= escalateAt) {
       _pictureFrozenCount = 0;
       _pictureReloadCount++;
       // next-cooldown 必须用自增后的 reloads（对抗验证抓到的 off-by-one）：
@@ -1654,24 +1667,25 @@ class PlPlayerController with BlockConfigMixin {
       'speed=${playbackSpeed}x '
       'time-pos=${positionInMilliseconds ~/ 1000}s '
       'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
-      '-> ${_pictureFrozenCount < 2 ? 'refresh video surface' : 'refresh surface + resync video pts'}',
+      '-> refresh video surface (no frame-drop evidence: treating as static picture)',
       null,
     );
     _logPipelineSnapshot('picture-frozen');
 
-    // 第 1、2 次：重建视频输出表面与纹理 —— 不动播放位置。
-    // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点。
-    _applyVideoOutputSize(force: true);
-
-    // 第 2 次（1x 下不会到 3 次就升级）再叠一次「对齐到音频时钟当前位置」：
-    // 对付 B 类（视频 pts 真在落后音频）比单纯重建表面更有针对性；
-    // 音频不动，所以即使误判也只是原地重跳，不丢进度。
-    if (_pictureFrozenCount >= 2) {
-      seekTo(
-        Duration(milliseconds: positionInMilliseconds),
-        isSeek: false,
+    // 只重建一次视频输出表面与纹理 —— 不动播放位置。
+    // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点，而且完全不动
+    // 播放位置，所以即使误判（静态画面）也只是白白重建一次表面。
+    if (_pictureSurfaceRefreshCount > 0) {
+      // 已经重建过一次画面还是不动 → 更可能是静态画面，停止动作，只留日志。
+      Utils.reportError(
+        'picture frozen: surface already refreshed once, no further action '
+        '(vo-drop=$prevDrops->$drops time-pos=${positionInMilliseconds ~/ 1000}s)',
+        null,
       );
+      return;
     }
+    _pictureSurfaceRefreshCount++;
+    _applyVideoOutputSize(force: true);
   }
 
   // 记一条管线快照。tag 用于区分触发时机（见上面的说明）。

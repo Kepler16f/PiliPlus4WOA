@@ -23,6 +23,9 @@
 #      the just-nulled textures; that frame's CopyResource is skipped and the
 #      shared texture keeps the previous frame -- a frozen picture while mpv
 #      happily keeps rendering.
+#   3. Fixes an EGL usage error that froze the picture while audio and the
+#      position kept advancing (see the CleanUp / CreateAndBindEGLSurface
+#      edits below for the full mechanism).
 #
 # All inserted C++ comments are ASCII on purpose: MSVC reads sources in the
 # system codepage unless /utf-8 is set, so non-ASCII comments in a file whose
@@ -271,6 +274,61 @@ void ANGLESurfaceManager::SetSize(int32_t width, int32_t height) {
   Create();
   ::ReleaseMutex(mutex_);
 }
+'@
+
+$OldCleanUpRelease = @'
+    // Clear context & destroy existing |surface_|.
+    eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_);
+    if (display_ != EGL_NO_DISPLAY && surface_ != EGL_NO_SURFACE) {
+      eglDestroySurface(display_, surface_);
+    }
+    surface_ = EGL_NO_SURFACE;
+  }
+'@
+
+$NewCleanUpRelease = @'
+    // PiliPlus4WOA: release the context properly before dropping the surface.
+    // The original call passed `context_` as the 4th argument together with
+    // EGL_NO_SURFACE as both the draw and the read target. Per the EGL spec
+    // that combination is invalid: eglMakeCurrent() returns EGL_BAD_ACCESS and
+    // changes nothing, so the context stayed bound to whichever thread had
+    // made it current last. Create() then issued its GL calls
+    // (eglBindTexImage / glGenTextures) from a thread that did not own the
+    // context, where they silently failed -- the D3D shared texture was never
+    // written again and the picture froze while mpv kept decoding, so audio
+    // and the progress bar kept moving. EGL_NO_CONTEXT is the only way to
+    // unbind a context.
+    eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (display_ != EGL_NO_DISPLAY && surface_ != EGL_NO_SURFACE) {
+      eglDestroySurface(display_, surface_);
+    }
+    surface_ = EGL_NO_SURFACE;
+  }
+'@
+
+$OldBindTexImage = @'
+  GLuint t;
+  glGenTextures(1, &t);
+  glBindTexture(GL_TEXTURE_2D, t);
+  eglBindTexImage(display_, surface_, EGL_BACK_BUFFER);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+'@
+
+$NewBindTexImage = @'
+  // PiliPlus4WOA: the GL calls below need a current context. CleanUp() no
+  // longer leaves one bound (see the EGL_BAD_ACCESS fix above), and Create()
+  // may run on the Flutter platform thread as well as on the plugin thread
+  // pool, so bind the context here and release it again afterwards. Leaving
+  // it unbound is what lets Draw() (plugin thread pool) bind it later.
+  MakeCurrent(true);
+  GLuint t;
+  glGenTextures(1, &t);
+  glBindTexture(GL_TEXTURE_2D, t);
+  eglBindTexImage(display_, surface_, EGL_BACK_BUFFER);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  MakeCurrent(false);
 '@
 
 $OldMakeCurrent = @'
@@ -691,6 +749,8 @@ $edits = @(
     @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
     @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
     @{ file = $anglePath;  old = $OldSetSize;        new = $NewSetSize;                     label = "angle_surface_manager.cc: SetSize under mutex" },
+    @{ file = $anglePath;  old = $OldCleanUpRelease; new = $NewCleanUpRelease;             label = "angle_surface_manager.cc: release context with EGL_NO_CONTEXT" },
+    @{ file = $anglePath;  old = $OldBindTexImage;  new = $NewBindTexImage;                label = "angle_surface_manager.cc: bind context around GL calls" },
     @{ file = $anglePath;  old = $OldMakeCurrent;    new = $NewMakeCurrent;                 label = "angle_surface_manager.cc: MakeCurrent counter" },
     @{ file = $anglePath;  old = $OldDraw;           new = $NewDraw;                        label = "angle_surface_manager.cc: Draw counter" },
     @{ file = $anglePath;  old = $OldRead;           new = $NewRead;                        label = "angle_surface_manager.cc: Read counter + null guard" },
