@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:PiliPlus/http/api.dart';
+import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/http/init.dart';
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/common/search/search_type.dart';
@@ -12,7 +13,6 @@ import 'package:PiliPlus/models_new/pgc/pgc_info_model/result.dart';
 import 'package:PiliPlus/models_new/search/search_rcmd/data.dart';
 import 'package:PiliPlus/models_new/search/search_trending/data.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
-import 'package:PiliPlus/utils/request_utils.dart';
 import 'package:PiliPlus/utils/wbi_sign.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
@@ -85,6 +85,7 @@ abstract final class SearchHttp {
           'origin': 'https://search.bilibili.com',
           'referer':
               'https://search.bilibili.com/${searchType.name}?keyword=${Uri.encodeFull(keyword)}',
+          'user-agent': BrowserUa.pc,
         },
       ),
     );
@@ -94,7 +95,7 @@ abstract final class SearchHttp {
         final Map<String, dynamic> dataData = resData['data'];
         final vVoucher = dataData['v_voucher'];
         if (vVoucher != null) {
-          RequestUtils.validate(vVoucher, onSuccess);
+          // RequestUtils.validate(vVoucher, onSuccess);
           return const Error('触发风控');
         }
         try {
