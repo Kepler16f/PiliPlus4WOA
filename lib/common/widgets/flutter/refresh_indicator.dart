@@ -13,7 +13,6 @@ import 'package:PiliPlus/common/widgets/scroll_physics.dart'
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/touch_debug_log.dart';
-import 'package:PiliPlus/utils/utils.dart';
 import 'package:extended_nested_scroll_view/refresh.dart';
 import 'package:flutter/foundation.dart' show clampDouble;
 import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
@@ -38,10 +37,12 @@ set displacement(double value) {
 // displacement, as a percentage of the scrollable's container extent.
 // 触摸下拉刷新优化开启时，使用移动端默认位移使下拉更省力（ARM64 修改版特有）。
 double get refreshDragExtent {
-  final double effectiveDisplacement =
-      Pref.touchRefreshOptimization ? 20.0 : _displacement;
+  final double effectiveDisplacement = Pref.touchRefreshOptimization
+      ? 20.0
+      : _displacement;
   return (effectiveDisplacement + kIndicatorSize) * _kDragSizeFactorLimit;
 }
+
 // How much the scroll's drag gesture can overshoot the RefreshIndicator's
 // displacement; max displacement = _kDragSizeFactorLimit * displacement.
 const double _kDragSizeFactorLimit = 1.5;
@@ -232,6 +233,8 @@ class RefreshIndicatorState extends State<RefreshIndicator>
 
   RefreshIndicatorStatus? _status;
   late Future<void> _pendingRefreshFuture;
+  Completer<void>? _refreshCompleter;
+  int _transitionId = 0;
   double? _dragOffset;
   late Color _effectiveValueColor;
   // late Color _backgroundColor;
@@ -284,6 +287,9 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   @protected
   @override
   void dispose() {
+    ++_transitionId;
+    final completer = _refreshCompleter;
+    if (completer != null && !completer.isCompleted) completer.complete();
     _positionController.dispose();
     _scaleController.dispose();
     super.dispose();
@@ -334,6 +340,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
           (_status == RefreshIndicatorStatus.drag ||
               _status == RefreshIndicatorStatus.done ||
               _status == RefreshIndicatorStatus.canceled)) {
+        ++_transitionId;
         _dragOffset = null;
         _status = null;
       } else {
@@ -350,7 +357,11 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     }
     TouchDebugLog.log(
       'Scroll ${notification.runtimeType} '
-      'drag=${notification is ScrollUpdateNotification ? notification.dragDetails != null : notification is ScrollStartNotification ? notification.dragDetails != null : '-'} '
+      'drag=${notification is ScrollUpdateNotification
+          ? notification.dragDetails != null
+          : notification is ScrollStartNotification
+          ? notification.dragDetails != null
+          : '-'} '
       'pixels=${notification.metrics.pixels.toStringAsFixed(1)} '
       'extentBefore=${notification.metrics.extentBefore.toStringAsFixed(1)} '
       'status=$_status '
@@ -394,28 +405,6 @@ class RefreshIndicatorState extends State<RefreshIndicator>
           _status == RefreshIndicatorStatus.canceled) {
         _dismiss(RefreshIndicatorStatus.canceled);
       }
-      // 注意 snap 不在此列（ARM64 修改版 2026-09-28 修）：snap 是 _show() 的中间态，
-      // 150ms 后由那句 `if (mounted && _status == RefreshIndicatorStatus.snap)`
-      // 决定是否进入 refresh 并调用 onRefresh()。若在 snap 期间把它 dismiss 掉，
-      // _status 变成 canceled → 那个判断永不成立 → **onRefresh() 一次都不会被调用**
-      // （下拉动作被静默吞掉，show() 返回的 future 也永不完成），页面数据不刷新。
-      // 而正常路径下 snap 必然在 150ms 内推进到 refresh、不会长期滞留，
-      // 所以这里不需要「恢复」它。
-      switch (_status) {
-        case RefreshIndicatorStatus.drag:
-          if (_valueColor.value!.a == _effectiveValueColor.a) {
-            _show();
-          } else {
-            _dismiss(RefreshIndicatorStatus.canceled);
-          }
-        case RefreshIndicatorStatus.canceled:
-        case RefreshIndicatorStatus.done:
-        case RefreshIndicatorStatus.refresh:
-        case RefreshIndicatorStatus.snap:
-        case null:
-          // do nothing
-          break;
-      }
     }
     return false;
   }
@@ -452,22 +441,10 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     ); // This triggers various rebuilds.
   }
 
-  // Stop showing the refresh indicator.
-  //
-  // ARM64 修改版（2026-09-18）：收尾动画**不能**决定状态什么时候清空。
-  //
-  // 原因：下面两个 `animateTo(...)` 返回的 TickerFuture 只有在 ticker 真正在跑
-  // 的时候才会完成。而 ticker 会因为 TickerMode 被关掉而停摆 —— 播放器重建布局、
-  // 标签页被切走、窗口不可见等都会走到这条路。一旦 ticker 停摆，
-  //   `await _scaleController.animateTo(...)` 就**永远不会返回**，
-  // 于是紧跟其后的 `_status = null` 也永远不执行：_status 永久停在
-  // done / canceled，而 build 里是 `_status == null ? null : <指示器>` ——
-  // **刷新圈就卡在屏幕上不走了**，只有整个 State 重建（退出重进播放器）才会好。
-  // 这正是用户报的「评论区下拉刷新动画偶发卡住、重进播放器就恢复」。
-  //
-  // 修法：动画只当收尾效果，与一个略长于动画时长的延时**赛跑**，保证一定有出口。
-  // 视觉上没有任何变化（正常情况下动画先完成），但状态清空不再依赖 ticker。
+  // Visual completion must not hold the state machine when a tab's ticker is
+  // muted. A generation also keeps an old dismissal from clearing a later pull.
   Future<void> _dismiss(RefreshIndicatorStatus newMode) async {
+    final transition = ++_transitionId;
     await Future<void>.value();
     // This can only be called from _show() when refreshing and
     // _handleScrollNotification in response to a ScrollEndNotification or
@@ -476,7 +453,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
       newMode == RefreshIndicatorStatus.canceled ||
           newMode == RefreshIndicatorStatus.done,
     );
-    if (!mounted) return;
+    if (!mounted || transition != _transitionId) return;
     setState(() {
       _status = newMode;
     });
@@ -501,7 +478,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
         _kIndicatorScaleDuration + const Duration(milliseconds: 100),
       ),
     ]);
-    if (mounted && _status == newMode) {
+    if (mounted && transition == _transitionId && _status == newMode) {
       _dragOffset = null;
       setState(() {
         _status = null;
@@ -512,56 +489,51 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   void _show() {
     assert(_status != RefreshIndicatorStatus.refresh);
     assert(_status != RefreshIndicatorStatus.snap);
-    TouchDebugLog.log('RefreshIndicator._show (start refresh)');
-    final Completer<void> completer = Completer<void>();
+    final transition = ++_transitionId;
+    final completer = Completer<void>();
+    _refreshCompleter = completer;
     _pendingRefreshFuture = completer.future;
     _status = RefreshIndicatorStatus.snap;
-    // ARM64 修改版（2026-09-20）：快照动画与「进入 refresh 状态、调用
-    // onRefresh」之间不能有依赖关系。
-    //
-    // 原来把两者串在 `_positionController.animateTo(...).whenComplete(...)` 里：
-    // animateTo 的 TickerFuture 只在 ticker 运行时才完成，而 ticker 会被静音
-    // （标签页被滑走、窗口不可见、页面进 Offstage）。ticker 一停，whenComplete
-    // 永不执行 → `_status` 永久停在 snap（刷新圈定在顶部、甚至 onRefresh 都
-    // 没开始跑），只有整个 State 重建（退出重进播放器）才恢复 —— 这正是
-    // 用户报的「评论区下拉刷新动画偶发卡住、重进播放器就好」。
-    //
-    // 修法与 _dismiss 同一套：快照动画照常跑，但用与动画赛跑的延时保证
-    // **一定**会进入 refresh 并调用 onRefresh。视觉效果不变（正常情况下
-    // 动画先完成），状态机不再依赖 ticker 是否能跑。
-    final TickerFuture snap = _positionController.animateTo(
-      1.0 / _kDragSizeFactorLimit,
-      duration: _kIndicatorSnapDuration,
-    );
-    Future.any([
-      snap.then((_) {}, onError: (_) {}),
-      Future<void>.delayed(_kIndicatorSnapDuration),
-    ]).then((_) {
-      if (mounted && _status == RefreshIndicatorStatus.snap) {
-        setState(() {
-          // Show the indeterminate progress indicator.
-          _status = RefreshIndicatorStatus.refresh;
-        });
+    TouchDebugLog.log('refresh=$transition phase=snap');
+    _runRefresh(transition, completer);
+  }
 
-        // onRefresh() 可能**同步**抛异常（例如页面在首帧就碰了还没就绪的资源）。
-        // 那样 whenComplete 根本挂不上，而离开 refresh 的唯一出口就在这里 ——
-        // 于是不确定进度的加载圈会一直转（用户报的「刷新动画卡住」，重进页面
-        // 才消失）。这里把同步异常也走完收尾流程。
-        Future<void> pending;
-        try {
-          pending = widget.onRefresh();
-        } catch (e) {
-          Utils.reportError('RefreshIndicator.onRefresh threw synchronously: $e', null);
-          pending = Future<void>.value();
-        }
-        pending.whenComplete(() {
-          if (mounted && _status == RefreshIndicatorStatus.refresh) {
-            completer.complete();
-            _dismiss(RefreshIndicatorStatus.done);
-          }
-        });
+  Future<void> _runRefresh(int transition, Completer<void> completer) async {
+    try {
+      final snap = _positionController.animateTo(
+        1.0 / _kDragSizeFactorLimit,
+        duration: _kIndicatorSnapDuration,
+      );
+      await Future.any([
+        snap.then((_) {}, onError: (_) {}),
+        Future<void>.delayed(_kIndicatorSnapDuration),
+      ]);
+      if (!mounted || transition != _transitionId) return;
+      // Stop a muted snap before it resumes over the active refresh later.
+      _positionController.value = 1.0 / _kDragSizeFactorLimit;
+      setState(() => _status = RefreshIndicatorStatus.refresh);
+      TouchDebugLog.log('refresh=$transition phase=request');
+      // Await catches both synchronous callback throws and asynchronous errors.
+      await widget.onRefresh();
+      TouchDebugLog.log('refresh=$transition phase=complete');
+    } catch (error, stack) {
+      TouchDebugLog.log(
+        'refresh=$transition phase=error type=${error.runtimeType}',
+      );
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'PiliPlus refresh indicator',
+        ),
+      );
+    } finally {
+      // Callers waiting on show() must also be released after page disposal.
+      if (!completer.isCompleted) completer.complete();
+      if (mounted && transition == _transitionId) {
+        await _dismiss(RefreshIndicatorStatus.done);
       }
-    });
+    }
   }
 
   /// Show the refresh indicator and run the refresh callback as if it had
@@ -659,7 +631,9 @@ class RefreshIndicatorState extends State<RefreshIndicator>
   }
 
   bool _onDrag(double offset) {
-    TouchDebugLog.log('_onDrag offset=$offset status=$_status pos=${_positionController.value.toStringAsFixed(2)}');
+    TouchDebugLog.log(
+      '_onDrag offset=$offset status=$_status pos=${_positionController.value.toStringAsFixed(2)}',
+    );
     if (_positionController.value > 0.0 && _status == .drag) {
       _dragOffset = _dragOffset! + offset;
       _checkDragOffset();

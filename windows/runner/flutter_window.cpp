@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include "touch_input_guard.h"
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -26,7 +27,12 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
 
-  SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  const HWND view_window = flutter_controller_->view()->GetNativeWindow();
+  if (!SetWindowSubclass(view_window, piliplus::TouchInputGuard, piliplus::kTouchInputGuardId, 0)) {
+    OutputDebugString(L"PiliPlus: failed to install touch input guard\n");
+    return false;
+  }
+  SetChildContent(view_window);
 
   // flutter_controller_->engine()->SetNextFrameCallback([&]() {
   //   this->Show();

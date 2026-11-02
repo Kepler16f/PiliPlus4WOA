@@ -79,6 +79,15 @@ jobs:
           flutter build windows --release --dart-define-from-file=pili_release.json --no-pub
         shell: pwsh
 
+      - name: Verify touch input guard on ARM64
+        shell: pwsh
+        run: |
+          cmake -S test/windows -B build/touch-input-test -A ARM64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/touch-input-test --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build/touch-input-test -C Release --output-on-failure
+
       - name: Generate Inno Setup script
         shell: pwsh
         run: |

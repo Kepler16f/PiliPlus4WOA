@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.14)
+project(touch_input_guard_test LANGUAGES CXX)
+enable_testing()
+add_executable(touch_input_guard_test touch_input_guard_test.cpp)
+target_compile_features(touch_input_guard_test PRIVATE cxx_std_17)
+target_link_libraries(touch_input_guard_test PRIVATE comctl32 user32)
+add_test(NAME touch_input_guard COMMAND touch_input_guard_test)
