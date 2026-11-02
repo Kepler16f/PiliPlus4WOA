@@ -21,6 +21,8 @@ abstract final class RecommendFilter {
     return filterAll(videoItem);
   }
 
+  /// hot/rank/[filterAll]
+
   static bool filterLikeRatio(int? like, int? view) {
     if (view != null) {
       return (view > -1 && view < minPlayForRcmd) ||
@@ -30,6 +32,8 @@ abstract final class RecommendFilter {
     }
     return false;
   }
+
+  /// hot/rank/[filterAll]
 
   static bool filterTitle(String title) {
     return (enableFilter && rcmdRegExp.hasMatch(title));

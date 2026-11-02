@@ -60,6 +60,7 @@ class _MainReplyPageState extends State<MainReplyPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+
     colorScheme = ColorScheme.of(context);
   }
 

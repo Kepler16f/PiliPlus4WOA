@@ -187,12 +187,14 @@ class _UgcIntroPanelState extends State<UgcIntroPanel> {
                           !videoDetailCtr
                               .plPlayerController
                               .horizontalSeasonPanel))
-                    Obx(
-                      () => SeasonPanel(
-                        key: ValueKey(introController.videoDetail.value),
-                        heroTag: widget.heroTag,
-                        showEpisodes: widget.showEpisodes,
-                        ugcIntroController: introController,
+                    NoTranslucentArea(
+                      child: Obx(
+                        () => SeasonPanel(
+                          key: ValueKey(introController.videoDetail.value),
+                          heroTag: widget.heroTag,
+                          showEpisodes: widget.showEpisodes,
+                          ugcIntroController: introController,
+                        ),
                       ),
                     ),
                   if (!isLoading &&

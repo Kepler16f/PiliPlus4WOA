@@ -26,3 +26,9 @@ class GlobalData {
   // 获取全局实例
   factory GlobalData() => _instance;
 }
+
+/// 过滤掉被拉黑的用户（上游 c2a5091a1）。
+extension IterableExt<E> on Iterable<E> {
+  Iterable<E> whereNotBlocked(Object? /* mid */ Function(E element) test) =>
+      where((e) => !GlobalData().blackMids.contains(test(e)));
+}
