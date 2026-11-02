@@ -738,6 +738,8 @@ class PlPlayerController with BlockConfigMixin {
       _pictureFrozenDrops = null;
       _pictureFrozenCount = 0;
       _pictureSurfaceRefreshCount = 0;
+      // 换了片源 → 丢掉「长按持续后退」攒下来的目标位置（见 multiBackwardStart）。
+      _multiBackwardTargetMs = null;
       _resetStallWatchdogProgress();
       // 换片源 → 重新开始「音频停摆」判定的宽限期（见 _audioStallGraceUntil）：
       // 新片源刚 open，AO 还没挂上、audio-pts 还是 null，不能当成停摆。
@@ -2812,6 +2814,40 @@ class PlPlayerController with BlockConfigMixin {
 
   void onBackward(Duration duration) {
     onForwardBackward(videoPlayerController!.state.position - duration);
+  }
+
+  // 长按左方向键持续后退（上游 #3379）。
+  //
+  // 上游用一个 seekPosition 累加器：按住不放时每 200ms 一拍，把目标位置往后
+  // 挪一个 fastForBackwardDuration，松手时一次性跳到累计位置；轻点一下（还没
+  // 攒到一拍）仍然只退固定步长。
+  //
+  // 本地没有那个累加器（播放进度直接取 mpv 的 position），所以自己记一个
+  // 「目标位置」：第一拍从当前进度开始，之后每拍在上一拍的基础上再退一段。
+  int? _multiBackwardTargetMs;
+
+  void multiBackwardStart([_]) {
+    final base =
+        _multiBackwardTargetMs ??
+        (videoPlayerController?.state.position.inMilliseconds ??
+            positionInMilliseconds);
+    final target = base - fastForBackwardDuration.inMilliseconds;
+    _multiBackwardTargetMs = target < 0 ? 0 : target;
+    // 标记成「正在跳转」：看门狗在 isSeeking 为 true 时不判定画面冻结，
+    // 否则按住不放的这几秒会被误判成卡死而触发自愈重开。
+    isSeeking.value = true;
+  }
+
+  void multiBackwardEnd() {
+    final target = _multiBackwardTargetMs;
+    _multiBackwardTargetMs = null;
+    if (target == null) {
+      // 没攒到一拍 → 只是一次轻点，退固定步长。
+      onBackward(fastForBackwardDuration);
+      return;
+    }
+    isSeeking.value = false;
+    onForwardBackward(Duration(milliseconds: target));
   }
 
   void onForwardBackward(Duration duration) {

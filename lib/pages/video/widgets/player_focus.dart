@@ -160,6 +160,29 @@ class PlayerFocus extends StatelessWidget {
       return true;
     }
 
+    // 长按左方向键持续后退（上游 #3379）：按住时每一拍把目标位置往后挪一段，
+    // 松手时一次性跳过去；轻点一下仍然只退固定步长。
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (!plPlayerController.isLive) {
+        if (event is KeyDownEvent) {
+          if (hasPlayer) {
+            plPlayerController
+              ..longPressTimer?.cancel()
+              ..longPressTimer = Timer.periodic(
+                const Duration(milliseconds: 200),
+                plPlayerController.multiBackwardStart,
+              );
+          }
+        } else if (event is KeyUpEvent) {
+          plPlayerController.cancelLongPressTimer();
+          if (hasPlayer) {
+            plPlayerController.multiBackwardEnd();
+          }
+        }
+      }
+      return true;
+    }
+
     if (event is KeyDownEvent) {
       switch (key) {
         case LogicalKeyboardKey.space:
@@ -252,14 +275,6 @@ class PlayerFocus extends StatelessWidget {
         }
 
         switch (key) {
-          case LogicalKeyboardKey.arrowLeft:
-            if (hasPlayer) {
-              plPlayerController.onBackward(
-                plPlayerController.fastForBackwardDuration,
-              );
-            }
-            return true;
-
           case LogicalKeyboardKey.keyW:
             if (HardwareKeyboard.instance.isMetaPressed) {
               return true;
