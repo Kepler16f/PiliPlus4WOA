@@ -33,7 +33,8 @@ List<SettingsModel> get videoSettings => [
   ),
   SwitchModel(
     title: '禁用解码器帧线程',
-    subtitle: '修复旧版 libmpv（2026-09 期构建）上播放一段时间后闪退'
+    subtitle:
+        '修复旧版 libmpv（2026-09 期构建）上播放一段时间后闪退'
         '（H.264 帧线程同步 bug）。只关闭帧线程、保留多线程解码；'
         'libmpv 已升级，故默认关闭。若闪退复现请重新打开。重新打开视频生效',
     leading: const Icon(Icons.memory_outlined),
@@ -374,7 +375,7 @@ Future<void> _showCodecsDialog(
   final res = await showDialog<List<VideoDecodeFormatType>>(
     context: context,
     builder: (context) => OrderedMultiSelectDialog<VideoDecodeFormatType>(
-      title: '首选解码格式',
+      title: const Text('首选解码格式'),
       initValues: Pref.preferCodecs,
       values: {for (final e in VideoDecodeFormatType.values) e: e.name},
     ),
@@ -395,7 +396,7 @@ Future<void> _showCellularCodecsDialog(
   final res = await showDialog<List<VideoDecodeFormatType>>(
     context: context,
     builder: (context) => OrderedMultiSelectDialog<VideoDecodeFormatType>(
-      title: '蜂窝网络首选解码格式',
+      title: const Text('蜂窝网络首选解码格式'),
       initValues: Pref.preferCodecsCellular,
       values: {for (final e in VideoDecodeFormatType.values) e: e.name},
     ),
@@ -416,7 +417,7 @@ Future<void> _showAudioOutputDialog(
   final res = await showDialog<List<String>>(
     context: context,
     builder: (context) => OrderedMultiSelectDialog<String>(
-      title: '音频输出设备',
+      title: const Text('音频输出设备'),
       initValues: Pref.audioOutput.split(','),
       values: {
         for (final e in AudioOutput.values) e.name: e.label,
@@ -447,27 +448,28 @@ Future<void> _showVideoSyncDialog(
     builder: (context) => SelectDialog<String>(
       title: '视频同步',
       value: Pref.videoSync,
-      values: const [
-        'audio',
-        'display-resample',
-        'display-resample-vdrop',
-        'display-resample-desync',
-        'display-tempo',
-        'display-vdrop',
-        'display-adrop',
-        'display-desync',
-        'desync',
-      ]
-          .map(
-            (e) => (
-              e,
-              wasDesktop && e.startsWith('display-')
-                  // 说清楚为什么：这条提示就是「设了却像没设」那件事的答案。
-                  ? '$e（桌面端不可用：渲染库不上报呈现时刻，会丢帧卡住）'
-                  : e,
-            ),
-          )
-          .toList(),
+      values:
+          const [
+                'audio',
+                'display-resample',
+                'display-resample-vdrop',
+                'display-resample-desync',
+                'display-tempo',
+                'display-vdrop',
+                'display-adrop',
+                'display-desync',
+                'desync',
+              ]
+              .map(
+                (e) => (
+                  e,
+                  wasDesktop && e.startsWith('display-')
+                      // 说清楚为什么：这条提示就是「设了却像没设」那件事的答案。
+                      ? '$e（桌面端不可用：渲染库不上报呈现时刻，会丢帧卡住）'
+                      : e,
+                ),
+              )
+              .toList(),
     ),
   );
   if (res != null) {
@@ -483,7 +485,7 @@ Future<void> _showHwDecDialog(
   final res = await showDialog<List<String>>(
     context: context,
     builder: (context) => OrderedMultiSelectDialog<String>(
-      title: '硬解模式',
+      title: const Text('硬解模式'),
       initValues: Pref.hardwareDecoding.split(','),
       values: {
         for (final e in HwDecType.values) e.hwdec: '${e.hwdec}\n${e.desc}',
