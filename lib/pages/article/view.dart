@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/common/widgets/badge.dart';
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart';
@@ -12,13 +13,14 @@ import 'package:PiliPlus/common/widgets/scroll_physics.dart'
 import 'package:PiliPlus/common/widgets/sliver/sliver_to_box_adapter.dart';
 import 'package:PiliPlus/models/common/image_preview_type.dart';
 import 'package:PiliPlus/models/dynamics/article_content_model.dart' show Pic;
-import 'package:PiliPlus/models/dynamics/result.dart' show DynamicStat;
+import 'package:PiliPlus/models/dynamics/result.dart' show DynamicStat, Tribee;
 import 'package:PiliPlus/pages/article/controller.dart';
 import 'package:PiliPlus/pages/article/widgets/article_ops.dart';
 import 'package:PiliPlus/pages/article/widgets/html_render.dart';
 import 'package:PiliPlus/pages/article/widgets/opus_content.dart';
 import 'package:PiliPlus/pages/common/dyn/common_dyn_page.dart';
 import 'package:PiliPlus/pages/dynamics_repost/view.dart';
+import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/extension/get_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -162,6 +164,7 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
       () {
         if (controller.isLoaded.value) {
           final Widget content;
+          late final modules = controller.opusData?.modules;
           if (controller.opus != null) {
             // if (kDebugMode) debugPrint('json page');
             content = OpusContent(
@@ -170,11 +173,14 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
               maxWidth: maxWidth,
               opusId: controller.id,
             );
-          } else if (controller.opusData?.modules.moduleBlocked
-              case final moduleBlocked?) {
+          } else if (modules?.moduleBlocked case final moduleBlocked?) {
             // if (kDebugMode) debugPrint('moduleBlocked');
             content = SliverToBoxAdapter(
-              child: moduleBlockedItem(context, theme, moduleBlocked),
+              child: moduleBlockedItem(
+                context,
+                theme.colorScheme,
+                moduleBlocked,
+              ),
             );
           } else if (controller.articleData?.content != null) {
             if (controller.articleData?.type == 3) {
@@ -211,11 +217,13 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
             content = const SliverToBoxAdapter(child: Text('NULL'));
           }
 
+          final isOpus = controller.type != 'read';
+
           return SliverMainAxisGroup(
             slivers: [
-              if (controller.type != 'read')
-                if (controller.opusData?.modules.moduleTop?.display?.album?.pics
-                    case final pics? when pics.isNotEmpty)
+              if (isOpus)
+                if (modules?.moduleTop?.display?.album?.pics case final pics?
+                    when pics.isNotEmpty)
                   SliverToBoxAdapter(child: _buildImageGallery(pics)),
               if (controller.summary.title != null)
                 SliverToBoxWithVisibilityAdapter(
@@ -226,13 +234,13 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
                   ),
                 ),
               SliverToBoxAdapter(child: _buildAuthor()),
-              if (controller.type != 'read' &&
-                  controller.opusData?.modules.moduleCollection != null)
+              if (isOpus) ...?modules?.moduleTribee?.items?.map(_buildTribee),
+              if (isOpus && modules?.moduleCollection != null)
                 SliverToBoxAdapter(
                   child: SelectionContainer.disabled(
                     child: opusCollection(
-                      theme,
-                      controller.opusData!.modules.moduleCollection!,
+                      theme.colorScheme,
+                      modules!.moduleCollection!,
                     ),
                   ),
                 ),
@@ -245,6 +253,54 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
       },
     ),
   );
+
+  Widget _buildTribee(Tribee tribee) {
+    final colorScheme = theme.colorScheme;
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const .only(bottom: 8),
+        child: Material(
+          borderRadius: Style.borderRadius6,
+          color: colorScheme.onInverseSurface,
+          child: InkWell(
+            borderRadius: Style.borderRadius6,
+            onTap: tribee.jumpUrl == null
+                ? null
+                : () => PiliScheme.routePushFromUrl(tribee.jumpUrl!),
+            child: Padding(
+              padding: const .symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                children: [
+                  NetworkImgLayer(
+                    src: tribee.faceUrl,
+                    width: 30,
+                    height: 30,
+                    borderRadius: Style.borderRadius6,
+                  ),
+                  const SizedBox(width: 10),
+                  Text('${tribee.name}${tribee.suffix ?? ''}'),
+                  SizedBox(
+                    height: 20,
+                    child: VerticalDivider(
+                      width: 20,
+                      color: colorScheme.outline.withValues(alpha: .4),
+                    ),
+                  ),
+                  Text(
+                    '${tribee.dynCountText ?? ''} · ${tribee.latestTimeText ?? ''}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   PreferredSizeWidget _buildAppBar() => AppBar(
     title: Obx(() {
