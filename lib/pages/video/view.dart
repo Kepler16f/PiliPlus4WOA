@@ -139,7 +139,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   void initState() {
     super.initState();
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      playOwner: (tag: heroTag, type: VideoDetailPageV),
+    );
     PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
     videoDetailController = Get.put(VideoDetailController(), tag: heroTag);
 
@@ -418,7 +421,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       videoDetailController.plPlayerController.pause();
     }
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      playOwner: (tag: heroTag, type: VideoDetailPageV),
+    );
     PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
 
     introController.startTimer();

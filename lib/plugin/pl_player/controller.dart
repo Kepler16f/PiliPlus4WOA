@@ -69,6 +69,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:window_manager/window_manager.dart';
 
 typedef PlayCallback = Future<void>? Function();
+typedef PlayOwner = ({String tag, Type? type});
 
 class PlPlayerController with BlockConfigMixin {
   Player? _videoPlayerController;
@@ -536,9 +537,19 @@ class PlPlayerController with BlockConfigMixin {
     return _instance != null;
   }
 
-  static void setPlayCallBack(PlayCallback? playCallBack) {
+  static void setPlayCallBack(
+    PlayCallback? playCallBack, {
+    PlayOwner? playOwner,
+  }) {
     _playCallBack = playCallBack;
+    _playOwner = playOwner;
   }
+
+  // 上游 #3315：这个回调是全局静态的，视频页与直播间会互相覆盖。加一个
+  // 「归属标记」，页面就能判断当前回调是不是自己的（见 live_room 的
+  // _onPopPopupRoute），避免误把别人的播放回调清掉。
+  static PlayOwner? _playOwner;
+  static PlayOwner? get playOwner => _playOwner;
 
   static PlayCallback? _playCallBack;
 

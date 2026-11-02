@@ -1,14 +1,12 @@
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/video.dart';
 import 'package:PiliPlus/models/common/account_type.dart';
-import 'package:PiliPlus/models/common/video/audio_quality.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/download/bili_download_media_file_info.dart';
 import 'package:PiliPlus/utils/accounts.dart';
-import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:collection/collection.dart';
@@ -42,28 +40,16 @@ abstract final class DownloadHttp {
       final dash = response.dash;
       if (dash != null) {
         final videoList = dash.video!;
-        final curHighestVideoQa = videoList.first.quality.code;
-        final preferVideoQa = entry.preferedVideoQuality;
-        int targetVideoQa = curHighestVideoQa;
-        if (response.acceptQuality?.isNotEmpty == true &&
-            preferVideoQa <= curHighestVideoQa) {
-          // 如果预设的画质低于当前最高
-          targetVideoQa = response.acceptQuality!.findClosestTarget(
-            (e) => e <= preferVideoQa,
-            (a, b) => a > b ? a : b,
-          );
-        }
-
-        /// 优先顺序 设置中指定解码格式 -> 当前可选的首个解码格式
-        final supportFormats = response.supportFormats!;
-        // 根据画质选编码格式
-        final targetSupportFormats = supportFormats.firstWhere(
-          (e) => e.quality == targetVideoQa,
-          orElse: () => supportFormats.first,
-        );
-
-        final currentDecodeFormats = VideoUtils.selectCodec(
-          targetSupportFormats.codecs!,
+        final (
+          targetVideoQa,
+          targetSupportFormats,
+          _,
+          videoDash,
+        ) = VideoUtils.findTargetVideo(
+          videoList,
+          entry.preferedVideoQuality,
+          response.acceptQuality,
+          response.supportFormats!,
           Pref.preferCodecs,
         );
 
@@ -75,21 +61,10 @@ abstract final class DownloadHttp {
               targetSupportFormats.newDesc ??
               VideoQuality.fromCode(targetVideoQa).desc;
 
-        /// 取出符合当前画质的videoList
-        final videosList = videoList
-            .where((e) => e.quality.code == targetVideoQa)
-            .toList();
-
-        /// 取出符合当前解码格式的videoItem
-        final videoDash = videosList.firstWhere(
-          (e) => currentDecodeFormats.codes.any(e.codecs!.startsWith),
-          orElse: () => videosList.first,
-        );
-
         final videoUrl = VideoUtils.getCdnUrl(videoDash.playUrls);
 
         final Type2File videoFile = Type2File(
-          id: videoDash.id!,
+          id: videoDash.id,
           baseUrl: videoUrl,
           bandwidth: videoDash.bandWidth!,
           codecid: videoDash.codecid!,
@@ -104,21 +79,9 @@ abstract final class DownloadHttp {
         List<Type2File>? audioFileList;
         final List<AudioItem>? audioDashList = dash.audio;
         if (audioDashList != null && audioDashList.isNotEmpty) {
-          final preferAudioQa = Pref.defaultAudioQa;
-          final List<int> audioIds = audioDashList
-              .map((map) => map.id!)
-              .toList();
-          int closestNumber = audioIds.findClosestTarget(
-            (e) => e <= preferAudioQa,
-            (a, b) => a > b ? a : b,
-          );
-          if (!audioIds.contains(preferAudioQa) &&
-              audioIds.any((e) => e > preferAudioQa)) {
-            closestNumber = AudioQuality.k192.code;
-          }
-          final AudioItem audioDash = audioDashList.firstWhere(
-            (e) => e.id == closestNumber,
-            orElse: () => audioDashList.first,
+          final audioDash = VideoUtils.findTargetAudio(
+            audioDashList,
+            Pref.defaultAudioQa,
           );
           final audioUrl = VideoUtils.getCdnUrl(
             audioDash.playUrls,
@@ -126,7 +89,7 @@ abstract final class DownloadHttp {
           );
           audioFileList = [
             Type2File(
-              id: audioDash.id!,
+              id: audioDash.id,
               baseUrl: audioUrl,
               bandwidth: audioDash.bandWidth!,
               codecid: audioDash.codecid!,
