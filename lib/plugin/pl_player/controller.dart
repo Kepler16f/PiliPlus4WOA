@@ -731,6 +731,7 @@ class PlPlayerController with BlockConfigMixin {
     VoidCallback? onInit,
     Volume? volume,
     bool autoFullScreenFlag = false,
+    int? rotate,
   }) async {
     try {
       _processing = true;
@@ -778,7 +779,7 @@ class PlPlayerController with BlockConfigMixin {
         return;
       }
       // 配置Player 音轨、字幕等等
-      await _createVideoController(dataSource, seekTo, volume);
+      await _createVideoController(dataSource, seekTo, volume, rotate);
 
       if (_playerCount == 0) {
         _removeListeners();
@@ -996,6 +997,7 @@ class PlPlayerController with BlockConfigMixin {
     DataSource dataSource,
     Duration? seekTo,
     Volume? volume,
+    int? rotate,
   ) async {
     isBuffering.value = false;
     _heartDuration = 0;
@@ -1025,6 +1027,8 @@ class PlPlayerController with BlockConfigMixin {
         ...liveBuffer
       else
         ...buffer,
+      // 桌面端旋转画面（上游 9378093b0）：直接交给 mpv 的 video-rotate。
+      if (rotate != null) 'video-rotate': rotate.toString(),
       // ARM64 修改版设计决策（2026-09）：禁用 ffmpeg 层断点续传自愈。
       //
       // 原因：CDN 断流后让 ffmpeg 在同一 demuxer 对象内无缝续传，会产生
@@ -1135,7 +1139,9 @@ class PlPlayerController with BlockConfigMixin {
       // 回退量按倍速放大（高倍速下音频时钟走得更快，同样的秒数只相当于更少的缓冲），
       // 上限 8s：再大就不是「缓冲」而是明显倒退进度了。
       final rawRewind = (3000 * _speedFactor).round();
-      final rewindMs = rawRewind < 3000 ? 3000 : (rawRewind > 8000 ? 8000 : rawRewind);
+      final rewindMs = rawRewind < 3000
+          ? 3000
+          : (rawRewind > 8000 ? 8000 : rawRewind);
       final startPos = ctr.state.position - Duration(milliseconds: rewindMs);
       // open() 本身也套超时（2026-09-17 对抗验证补充）：如果 mpv 卡死，
       // media_kit 的 open 链（stop(open:true) → loadfile）可能永不返回 ——
@@ -1168,7 +1174,8 @@ class PlPlayerController with BlockConfigMixin {
         }
         final currentPos = ctr.state.position.inMilliseconds;
         final coreIdle = _mpvProp('core-idle');
-        final posAdvanced = currentPos > initialPos && (currentPos - initialPos) >= 100;
+        final posAdvanced =
+            currentPos > initialPos && (currentPos - initialPos) >= 100;
         final decoding = coreIdle == 'no' && mpvPause != 'yes';
         if (posAdvanced || decoding) {
           break;
@@ -1343,6 +1350,7 @@ class PlPlayerController with BlockConfigMixin {
   // 一次网络重连会顺带把接下来 10s 的卡死恢复一起压掉（反之亦然），
   // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
   DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   /// 看门狗两级恢复之间的冷却（1x；倍速见 _stallCooldownNow）。
   /// 2026-10-01 由 4s 收到 3s：它只节流「恢复动作」，不参与「判定」
   /// （判定仍是 2s 窗口 + 滑动窗口计数），所以压低不会带来误判。
@@ -1374,6 +1382,7 @@ class PlPlayerController with BlockConfigMixin {
 
   // 自动重开的收尾定时器（见 _reloadAtCurrentPosition）。
   Timer? _reloadWatchdog;
+
   /// 重开时 `open()` 这条链本身的超时（stop(open:true) → loadfile）。
   /// 它只负责「别让 open 永不返回」——open 返回不代表画面回来了。
   static const Duration _reloadOpenTimeout = Duration(seconds: 6);
@@ -1843,7 +1852,10 @@ class PlPlayerController with BlockConfigMixin {
     final player = _videoPlayerController;
     if (player is NativePlayer) {
       try {
-        player.setProperty('audio-device', (device == null || device.isEmpty) ? 'auto' : device);
+        player.setProperty(
+          'audio-device',
+          (device == null || device.isEmpty) ? 'auto' : device,
+        );
       } catch (_) {}
     }
   }
@@ -1936,7 +1948,8 @@ class PlPlayerController with BlockConfigMixin {
       // 音频侧：用于判 E（画面在走、声音没了）。与下面那些视频判据共用同一次采样。
       final audioPts = _mpvProp('audio-pts');
       final ao = _mpvProp('current-ao');
-      final audioPosFrozen = audioPts != null &&
+      final audioPosFrozen =
+          audioPts != null &&
           _stallWatchdogLastAudioPts != null &&
           audioPts == _stallWatchdogLastAudioPts;
       _stallWatchdogLastAudioPts = audioPts;
@@ -2009,7 +2022,8 @@ class PlPlayerController with BlockConfigMixin {
       //         time-pos 多半也停 → 那种情况应该走 frozenPlaying 那条线
       //         （它的阶梯最后会整链重建，音频自然一起重建），不该被这里抢走，
       //         否则会把一次「渲染链停摆」误诊成「AO 问题」而白费一级。
-      final audioStalled = playing &&
+      final audioStalled =
+          playing &&
           !buffering &&
           !posFrozen &&
           !onlyPlayAudio.value &&
@@ -2042,7 +2056,11 @@ class PlPlayerController with BlockConfigMixin {
       //   3) 误判的代价是可见的：无故往回跳。
       // 所以 `avsync` 只进日志，不参与判定（见 _logPipelineSnapshot / stall 日志）。
       final bad =
-          dropping || outputStalled || frozenPlaying || notPlayingStuck || audioStalled;
+          dropping ||
+          outputStalled ||
+          frozenPlaying ||
+          notPlayingStuck ||
+          audioStalled;
       _stallWindowHistory.add(bad);
       while (_stallWindowHistory.length > _stallWindowHistorySize) {
         _stallWindowHistory.removeAt(0);

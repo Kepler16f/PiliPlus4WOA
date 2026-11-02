@@ -540,6 +540,20 @@ class HeaderControlState extends State<HeaderControl>
                   child: Row(
                     spacing: 10,
                     children: [
+                      if (PlatformUtils.isDesktop) ...[
+                        ActionItem(
+                          semanticsLabel: '向左旋转',
+                          onTap: () => videoDetailCtr.rotate = videoDetailCtr
+                              .calcRotate(-90),
+                          icon: const Icon(Icons.rotate_left),
+                        ),
+                        ActionItem(
+                          semanticsLabel: '向右旋转',
+                          onTap: () => videoDetailCtr.rotate = videoDetailCtr
+                              .calcRotate(90),
+                          icon: const Icon(Icons.rotate_right),
+                        ),
+                      ],
                       Obx(
                         () {
                           final flipX = plPlayerController.flipX.value;
@@ -609,12 +623,10 @@ class HeaderControlState extends State<HeaderControl>
                       Obx(
                         () => ActionRowLineItem(
                           iconData: Icons.play_circle_outline,
-                          onTap:
-                              plPlayerController.setContinuePlayInBackground,
+                          onTap: plPlayerController.setContinuePlayInBackground,
                           text: " 后台播放 ",
-                          selectStatus: plPlayerController
-                              .continuePlayInBackground
-                              .value,
+                          selectStatus:
+                              plPlayerController.continuePlayInBackground.value,
                         ),
                       ),
                     ],
@@ -920,8 +932,7 @@ class HeaderControlState extends State<HeaderControl>
     // ARM64 修改版：`availableVideoQualities` 定义在上游 url.dart 的
     // BaseItemExt（C 组改动，本 fork 未同步），这里内联等价实现：
     // 取 dash 视频流里真实存在（不重复）的画质码集合。
-    final availableQa =
-        videoInfo.dash!.video!.map((i) => i.id).toSet();
+    final availableQa = videoInfo.dash!.video!.map((i) => i.id).toSet();
 
     showBottomSheet(
       (context, setState) {
