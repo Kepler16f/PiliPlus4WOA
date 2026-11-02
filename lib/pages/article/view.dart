@@ -44,7 +44,8 @@ class ArticlePage extends StatefulWidget {
   State<ArticlePage> createState() => _ArticlePageState();
 }
 
-class _ArticlePageState extends CommonDynPageState<ArticlePage> {
+class _ArticlePageState extends CommonDynPageState<ArticlePage>
+    with DynReplyLocateStateMixin {
   @override
   final ArticleController controller = Get.putOrFind(
     ArticleController.new,
@@ -55,6 +56,17 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
   dynamic get arguments => {
     'id': controller.id,
   };
+
+  Key? _centerKey;
+
+  @override
+  void initState() {
+    super.initState();
+    if (Get.parameters.containsKey('viewComment') ||
+        controller.rootRpId != null) {
+      _centerKey = UniqueKey();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -80,6 +92,10 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
         padding: .symmetric(horizontal: padding),
         child: SelectionArea(
           child: CustomScrollView(
+            primary: true,
+            key: _centerKey,
+
+            center: _centerKey,
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
               _buildContent(
@@ -93,7 +109,10 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage> {
                   ),
                 ),
               ),
-              SelectionContainer.disabled(child: buildReplyHeader()),
+              SelectionContainer.disabled(
+                key: _centerKey,
+                child: buildReplyHeader(),
+              ),
               SelectionContainer.disabled(
                 child: Obx(() => replyList(controller.loadingState.value)),
               ),

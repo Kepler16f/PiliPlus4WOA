@@ -122,4 +122,18 @@ void main() {
     expect(completed, isTrue);
     expect(find.byType(RefreshProgressIndicator), findsNothing);
   });
+
+  testWidgets('a refresh that never completes is released by the watchdog', (
+    tester,
+  ) async {
+    final key = await mount(tester, () => Completer<void>().future);
+    var completed = false;
+    key.currentState!.show().then((_) => completed = true);
+    await tester.pump(const Duration(milliseconds: 160));
+    expect(find.byType(RefreshProgressIndicator), findsOneWidget);
+    await tester.pump(const Duration(seconds: 21));
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(completed, isTrue);
+    expect(find.byType(RefreshProgressIndicator), findsNothing);
+  });
 }

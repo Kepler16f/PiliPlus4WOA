@@ -46,4 +46,22 @@ abstract final class BiliUtils {
     3 => _liveGuard3,
     _ => null,
   };
+
+  static String? pgcType2Label(int? pgcType) => switch (pgcType) {
+    -1 => '课程',
+    1 => '番剧',
+    2 => '电影',
+    3 => '纪录片',
+    4 => '国创',
+    5 => '电视剧',
+    6 => '漫画',
+    7 => '综艺',
+    _ => null,
+  };
+
+  static bool isDynOrArticle(Object? type) => switch (type) {
+    String() => type == '11' || type == '17' || type == '12',
+    int() => type == 11 || type == 17 || type == 12,
+    _ => false,
+  };
 }

@@ -4,7 +4,7 @@
 
 // ignore_for_file: prefer_initializing_formals
 
-import 'dart:async' show Completer;
+import 'dart:async' show Completer, Timer;
 
 import 'package:PiliPlus/common/widgets/refresh_layout.dart';
 import 'package:PiliPlus/common/widgets/scroll_behavior.dart';
@@ -18,6 +18,13 @@ import 'package:flutter/foundation.dart' show clampDouble;
 import 'package:material_ui/material_ui.dart' hide RefreshIndicator;
 
 const kIndicatorSize = 49.0;
+
+/// 上限：一次刷新最多占用指示器这么久。
+///
+/// ARM64 修改版：网络请求偶尔会悬着不返回（弱网、代理半断、HTTP2 流卡住），
+/// 此时刷新圈会一直转，后续下拉也全部变成空操作（用户报的「触摸刷新动画卡死
+/// 无法完成」）。超时后强制收尾，保证指示器与状态机一定能回到可用状态。
+const Duration _refreshTimeout = Duration(seconds: 20);
 
 /// The distance from the child's top or bottom [edgeOffset] where
 /// the refresh indicator will settle. During the drag that exposes the refresh
@@ -514,7 +521,18 @@ class RefreshIndicatorState extends State<RefreshIndicator>
       setState(() => _status = RefreshIndicatorStatus.refresh);
       TouchDebugLog.log('refresh=$transition phase=request');
       // Await catches both synchronous callback throws and asynchronous errors.
-      await widget.onRefresh();
+      // A request that never completes would leave the indicator spinning
+      // forever and block every later pull, so the wait is bounded.
+      final timeout = Completer<void>();
+      final watchdog = Timer(_refreshTimeout, () {
+        TouchDebugLog.log('refresh=$transition phase=timeout');
+        if (!timeout.isCompleted) timeout.complete();
+      });
+      try {
+        await Future.any([widget.onRefresh(), timeout.future]);
+      } finally {
+        watchdog.cancel();
+      }
       TouchDebugLog.log('refresh=$transition phase=complete');
     } catch (error, stack) {
       TouchDebugLog.log(
