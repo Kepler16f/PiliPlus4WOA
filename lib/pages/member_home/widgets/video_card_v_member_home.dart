@@ -17,16 +17,15 @@ import 'package:material_ui/material_ui.dart';
 class VideoCardVMemberHome extends StatelessWidget {
   final SpaceArchiveItem videoItem;
 
-  const VideoCardVMemberHome({
-    super.key,
-    required this.videoItem,
-  });
+  const VideoCardVMemberHome(this.videoItem, {super.key});
 
   Future<void> onPushDetail() async {
     String? goto = videoItem.goto;
     switch (goto) {
       case 'bangumi':
-        PageUtils.viewPgc(epId: videoItem.param);
+        // 上游把 epId 收窄成 int? 后这里要显式解析；本项目的 viewPgc 仍是
+        // dynamic 参数，所以写全名避免点号简写推不出类型。
+        PageUtils.viewPgc(epId: int.parse(videoItem.param!));
         break;
 
       case 'av':
