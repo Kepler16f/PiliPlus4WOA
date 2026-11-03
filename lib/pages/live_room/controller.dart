@@ -736,10 +736,10 @@ class LiveRoomController extends GetxController {
           return Theme(
             data: ThemeUtils.darkTheme,
             child: LiveSendDmPanel(
-              fromEmote: fromEmote,
               liveRoomController: this,
               items: savedDanmaku,
               autofocus: !fromEmote,
+              panelType: fromEmote ? .emoji : .none,
               onSave: (msg) {
                 if (msg.isEmpty) {
                   savedDanmaku?.clear();

@@ -5,7 +5,7 @@ import 'package:PiliPlus/pages/common/multi_select/base.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:material_ui/material_ui.dart'
-    show ColorScheme, Widget, Positioned;
+    show ColorScheme, Widget, Positioned, BuildContext;
 
 class HistoryItemModel with MultiSelectData {
   String? title;
@@ -27,7 +27,8 @@ class HistoryItemModel with MultiSelectData {
   String? tagName;
   int? liveStatus;
 
-  Widget? get label => isFav == 1
+  Widget? label(BuildContext context, bool hasDuration, String? business) =>
+      isFav == 1
       ? const PBadge(
           text: '已收藏',
           top: 6.0,
@@ -39,9 +40,7 @@ class HistoryItemModel with MultiSelectData {
           text: badge,
           top: 6.0,
           right: 6.0,
-          type: history.business == 'live' && liveStatus != 1
-              ? .gray
-              : .primary,
+          type: business == 'live' && liveStatus != 1 ? .gray : .primary,
         )
       : null;
 

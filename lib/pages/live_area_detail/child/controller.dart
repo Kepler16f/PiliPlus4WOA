@@ -6,7 +6,6 @@ import 'package:PiliPlus/models_new/live/live_feed_index/card_data_list_item.dar
 import 'package:PiliPlus/models_new/live/live_second_list/data.dart';
 import 'package:PiliPlus/models_new/live/live_second_list/tag.dart';
 import 'package:PiliPlus/pages/common/common_list_controller.dart';
-import 'package:PiliPlus/utils/extension/scroll_controller_ext.dart';
 import 'package:get/get.dart';
 
 class LiveAreaChildController
@@ -63,6 +62,6 @@ class LiveAreaChildController
     tagIndex.value = index;
     this.sortType = sortType;
 
-    onRefresh().whenComplete(scrollController.jumpToTop);
+    onRefresh();
   }
 }

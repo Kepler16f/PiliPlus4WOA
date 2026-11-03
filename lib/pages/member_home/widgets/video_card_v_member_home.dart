@@ -17,16 +17,14 @@ import 'package:material_ui/material_ui.dart';
 class VideoCardVMemberHome extends StatelessWidget {
   final SpaceArchiveItem videoItem;
 
-  const VideoCardVMemberHome({
-    super.key,
-    required this.videoItem,
-  });
+  const VideoCardVMemberHome(this.videoItem, {super.key});
 
   Future<void> onPushDetail() async {
     String? goto = videoItem.goto;
     switch (goto) {
       case 'bangumi':
-        PageUtils.viewPgc(epId: videoItem.param);
+        PageUtils.viewPgc(epId: int.tryParse(videoItem.param ?? ''));
+
         break;
 
       case 'av':

@@ -58,8 +58,8 @@ abstract final class DownloadHttp {
           ..videoQuality = targetVideoQa
           ..preferedVideoQuality = targetVideoQa
           ..qualityPithyDescription =
-              targetSupportFormats.displayDesc ??
-              VideoQuality.fromCode(targetVideoQa).shortDesc;
+              targetSupportFormats.newDesc ??
+              VideoQuality.fromCode(targetVideoQa).desc;
 
         final videoUrl = VideoUtils.getCdnUrl(videoDash.playUrls);
 
@@ -127,7 +127,7 @@ abstract final class DownloadHttp {
         final FormatItem? formatItem = response.supportFormats
             ?.firstWhereOrNull((e) => e.quality == response.quality);
         final String description =
-            formatItem?.displayDesc ?? VideoQuality.clear480.shortDesc;
+            formatItem?.newDesc ?? VideoQuality.clear480.desc;
         final int targetVideoQa =
             formatItem?.quality ?? VideoQuality.clear480.code;
 
