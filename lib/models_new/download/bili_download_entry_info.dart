@@ -434,3 +434,53 @@ enum DownloadStatus {
 
   bool get isDownloading => index <= 3;
 }
+
+class SeasonInfo {
+  final int index;
+  final int id;
+  final String title;
+  final String cover;
+  final int mid;
+  final String uname;
+
+  SeasonInfo({
+    required this.index,
+    required this.id,
+    required this.title,
+    required this.cover,
+    required this.mid,
+    required this.uname,
+  });
+
+  factory SeasonInfo.fromJson(Map<String, dynamic> json) => SeasonInfo(
+    index: json['index'] as int,
+    id: json['id'] as int,
+    title: json['title'] as String,
+    cover: json['cover'] as String,
+    mid: json['mid'] as int,
+    uname: json['uname'] as String,
+  );
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'index': index,
+    'id': id,
+    'title': title,
+    'cover': cover,
+    'mid': mid,
+    'uname': uname,
+  };
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is SeasonInfo) {
+      return id == other.id;
+    }
+    return false;
+  }
+
+  @override
+  int get hashCode => id.hashCode;
+}

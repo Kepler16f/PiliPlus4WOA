@@ -135,22 +135,30 @@ class _ReplyPageState extends CommonRichTextPubPageState<ReplyPage> {
   List<Widget> buildInputView() {
     return [
       Padding(
-        padding: const .only(top: 12, right: 15, left: 15, bottom: 10),
-        child: RichTextField(
-          key: key,
-          controller: editController,
-          minLines: 4,
-          maxLines: 8,
-          autofocus: false,
-          onChanged: onChanged,
-          onSubmitted: onSubmitted,
-          focusNode: focusNode,
-          decoration: InputDecoration(
-            hintText: widget.hint ?? "输入回复内容",
-            border: InputBorder.none,
-            hintStyle: const TextStyle(fontSize: 14),
+        padding: const EdgeInsets.only(
+          top: 12,
+          right: 15,
+          left: 15,
+          bottom: 10,
+        ),
+        child: Obx(
+          () => RichTextField(
+            key: key,
+            controller: editController,
+            minLines: 4,
+            maxLines: 8,
+            autofocus: false,
+            readOnly: readOnly.value,
+            onChanged: onChanged,
+            onSubmitted: onSubmitted,
+            focusNode: focusNode,
+            decoration: InputDecoration(
+              hintText: widget.hint ?? "输入回复内容",
+              border: InputBorder.none,
+              hintStyle: const TextStyle(fontSize: 14),
+            ),
+            style: theme.textTheme.bodyLarge,
           ),
-          style: theme.textTheme.bodyLarge,
         ),
       ),
       Divider(

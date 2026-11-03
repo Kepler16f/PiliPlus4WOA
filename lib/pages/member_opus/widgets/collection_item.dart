@@ -8,15 +8,6 @@ import 'package:get/get_navigation/src/extension_navigation.dart';
 import 'package:material_ui/material_ui.dart'
     hide SliverGridDelegateWithMaxCrossAxisExtent;
 
-const double _kOpusChildRatio = 0.85;
-const _kGridDelegate = OpusGridDelegate(
-  maxCrossAxisExtent: 144,
-  mainAxisSpacing: Style.safeSpace,
-  crossAxisSpacing: Style.safeSpace,
-  childAspectRatio: _kOpusChildRatio,
-  mainAxisExtent: 48,
-);
-
 class CollectionSection extends StatelessWidget {
   const CollectionSection({
     super.key,
@@ -33,9 +24,8 @@ class CollectionSection extends StatelessWidget {
     final outline = ColorScheme.of(context).outline;
     final length = collection.allCollections.length;
     return OpusGridBuilder(
-      childCount: length,
       expand: collection.expand,
-      gridDelegate: _kGridDelegate,
+      childCount: length,
       builder: (_, opusGridInfo) {
         final count = opusGridInfo.crossAxisCount;
         final Widget footer;
@@ -118,7 +108,7 @@ class OpusCollectionItem extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AspectRatio(
-              aspectRatio: _kOpusChildRatio,
+              aspectRatio: kOpusChildRatio,
               child: LayoutBuilder(
                 builder: (context, boxConstraints) {
                   return Stack(

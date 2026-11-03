@@ -70,7 +70,9 @@ class _MemberArticleState extends State<MemberArticle>
                   if (index == response.length - 1) {
                     _controller.onLoadMore();
                   }
-                  return MemberArticleItem(response[index]);
+                  return MemberArticleItem(
+                    item: response[index],
+                  );
                 },
                 itemCount: response.length,
               )

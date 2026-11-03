@@ -217,25 +217,30 @@ class ReplyItemGrpc extends StatelessWidget {
                       ),
                   ],
                 ),
-                Text.rich(
-                  maxLines: 1,
-                  overflow: .ellipsis,
-                  style: TextStyle(fontSize: 11, color: colorScheme.outline),
-                  TextSpan(
-                    text: replyLevel == 0
-                        ? DateFormatUtils.format(
-                            replyItem.ctime.toInt(),
-                            format: DateFormatUtils.longFormatDs,
-                          )
-                        : DateFormatUtils.dateFormat(replyItem.ctime.toInt()),
-                    children: replyItem.replyControl.hasLocation()
-                        ? [
-                            TextSpan(
-                              text: ' • ${replyItem.replyControl.location}',
-                            ),
-                          ]
-                        : null,
-                  ),
+                Row(
+                  mainAxisSize: .min,
+                  children: [
+                    Text(
+                      replyLevel == 0
+                          ? DateFormatUtils.format(
+                              replyItem.ctime.toInt(),
+                              format: DateFormatUtils.longFormatDs,
+                            )
+                          : DateFormatUtils.dateFormat(replyItem.ctime.toInt()),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: colorScheme.outline,
+                      ),
+                    ),
+                    if (replyItem.replyControl.hasLocation())
+                      Text(
+                        ' • ${replyItem.replyControl.location}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: colorScheme.outline,
+                        ),
+                      ),
+                  ],
                 ),
               ],
             ),

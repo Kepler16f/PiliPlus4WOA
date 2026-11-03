@@ -7,7 +7,7 @@ import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
 class MemberComicItem extends StatelessWidget {
-  const MemberComicItem(this.item, {super.key});
+  const MemberComicItem({super.key, required this.item});
 
   final SpaceArchiveItem item;
 
