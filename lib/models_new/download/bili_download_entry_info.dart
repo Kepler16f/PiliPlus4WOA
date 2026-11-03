@@ -1,4 +1,7 @@
+import 'dart:io' show Platform, Process;
+
 import 'package:PiliPlus/common/widgets/badge.dart';
+import 'package:PiliPlus/models/common/badge_type.dart';
 import 'package:PiliPlus/models/common/video/base_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models_new/download/download_info.dart';
