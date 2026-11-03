@@ -14,6 +14,20 @@ extension IterableExt<T> on Iterable<T> {
     }
     return value;
   }
+
+  /// 上游 2.2.0：下载页按季/按批分组用。
+  Iterable<List<R>> mapChunked<R>(int size, R Function(T e) toElement) sync* {
+    Iterator<T> iterator = this.iterator;
+    List<R> buffer = [];
+    while (iterator.moveNext()) {
+      buffer.add(toElement(iterator.current));
+      if (buffer.length == size) {
+        yield buffer;
+        buffer = [];
+      }
+    }
+    if (buffer.isNotEmpty) yield buffer;
+  }
 }
 
 extension ListExt<T> on List<T> {

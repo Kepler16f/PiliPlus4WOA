@@ -1,5 +1,6 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, Process;
 
+import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:path/path.dart' as path;
 
 late final String tmpDirPath;
@@ -27,5 +28,27 @@ abstract final class PathUtils {
     return shaders
         .map((shader) => path.join(baseDirectory, shader))
         .join(Platform.isWindows ? ';' : ':');
+  }
+
+  /// 打开本地文件夹。
+  ///
+  /// 上游 2.2.0 把这段逻辑从下载条目模型里抽出来放到 PathUtils，
+  /// 本项目原先是内联在 `BiliDownloadEntryInfo.moreBtn` 里的，行为一致。
+  static Future<void> openDir(String dirPath) async {
+    try {
+      final String executable;
+      if (Platform.isWindows) {
+        executable = 'explorer';
+      } else if (Platform.isMacOS) {
+        executable = 'open';
+      } else if (Platform.isLinux) {
+        executable = 'xdg-open';
+      } else {
+        throw UnimplementedError();
+      }
+      await Process.run(executable, [dirPath]);
+    } catch (e) {
+      SmartDialog.showToast(e.toString());
+    }
   }
 }

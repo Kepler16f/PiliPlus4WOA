@@ -12,7 +12,7 @@ import 'package:PiliPlus/models_new/pgc/pgc_info_model/result.dart';
 import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
-import 'package:PiliPlus/pages/download/view.dart';
+import 'package:PiliPlus/pages/download/download/view.dart';
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/page.dart';
@@ -66,6 +66,15 @@ class _DownloadPanelState extends State<DownloadPanel> {
 
   late final cidSet = widget.cidSet;
   VideoQuality _quality = VideoQuality.fromCode(Pref.defaultVideoQa);
+  AudioQuality _audioQuality = AudioQuality.fromCode(Pref.defaultAudioQa);
+
+  late ColorScheme colorScheme;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    colorScheme = .of(context);
+  }
 
   @override
   void initState() {
@@ -89,87 +98,117 @@ class _DownloadPanelState extends State<DownloadPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final dividerColor = theme.colorScheme.outline.withValues(alpha: 0.2);
+    final dividerColor = colorScheme.outline.withValues(alpha: 0.2);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        _buildHeader(theme),
-        _buildBody(theme),
+        _buildHeader(),
+        _buildBody(),
         Divider(height: 1, color: dividerColor),
-        _buildFooter(theme, dividerColor),
+        _buildFooter(dividerColor),
       ],
     );
   }
 
-  Widget _buildHeader(ThemeData theme) {
-    final textStyle = TextStyle(color: theme.colorScheme.onSurfaceVariant);
+  Widget _buildHeader() {
+    final textStyle = TextStyle(color: colorScheme.onSurfaceVariant);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 0, 12),
       child: Row(
-        spacing: 16,
         children: [
-          Text(
-            '最高画质',
-            style: textStyle,
-          ),
-          Builder(
-            builder: (context) => PopupMenuButton<VideoQuality>(
-              initialValue: _quality,
-              onSelected: (value) {
-                _quality = value;
-                (context as Element).markNeedsBuild();
-              },
-              itemBuilder: (context) => VideoQuality.values
-                  .map(
-                    (e) => PopupMenuItem(
-                      value: e,
-                      child: Text(e.desc),
-                    ),
-                  )
-                  .toList(),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _quality.desc,
-                      style: const TextStyle(height: 1),
-                      strutStyle: const StrutStyle(height: 1, leading: 0),
-                    ),
-                    Icon(
-                      size: 18,
-                      Icons.keyboard_arrow_down,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ],
+          Expanded(
+            child: Row(
+              spacing: 12,
+              children: [
+                Text('画质', style: textStyle),
+                Builder(
+                  builder: (context) => PopupMenuButton<VideoQuality>(
+                    initialValue: _quality,
+                    onSelected: (value) {
+                      _quality = value;
+                      (context as Element).markNeedsBuild();
+                    },
+                    itemBuilder: (context) => VideoQuality.values
+                        .map(
+                          (e) => PopupMenuItem(
+                            value: e,
+                            child: Text(e.desc),
+                          ),
+                        )
+                        .toList(),
+                    child: _buildPopupMenuChild(_quality.desc),
+                  ),
                 ),
+                Text('音质', style: textStyle),
+                Builder(
+                  builder: (context) => PopupMenuButton<AudioQuality>(
+                    initialValue: _audioQuality,
+                    onSelected: (value) {
+                      _audioQuality = value;
+                      (context as Element).markNeedsBuild();
+                    },
+                    itemBuilder: (context) => AudioQuality.values
+                        .map(
+                          (e) => PopupMenuItem(
+                            value: e,
+                            child: Text(e.desc),
+                          ),
+                        )
+                        .toList(),
+                    child: _buildPopupMenuChild(_audioQuality.desc),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // ARM64 修改版：保留本项目原有的网络状态指示（移动端 + 桌面调试模式
+          // 显示「当前网络：WIFI/数据」文字），上游 2.2.0 改成了图标。
+          if (kDebugMode || PlatformUtils.isMobile)
+            Padding(
+              padding: const .only(right: 16),
+              child: StreamBuilder(
+                stream: Connectivity().onConnectivityChanged,
+                builder: (context, snapshot) {
+                  if (snapshot.data case final data?) {
+                    final network = data.contains(ConnectivityResult.wifi)
+                        ? 'WIFI'
+                        : '数据';
+                    return Text(
+                      '当前网络：$network',
+                      style: TextStyle(color: colorScheme.onSurfaceVariant),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                },
               ),
             ),
-          ),
-          if (kDebugMode || PlatformUtils.isMobile) ...[
-            const Spacer(),
-            StreamBuilder(
-              stream: Connectivity().onConnectivityChanged,
-              builder: (context, snapshot) {
-                if (snapshot.data case final data?) {
-                  final network = data.contains(ConnectivityResult.wifi)
-                      ? 'WIFI'
-                      : '数据';
-                  return Text('当前网络：$network', style: textStyle);
-                }
-                return const SizedBox.shrink();
-              },
-            ),
-            const SizedBox(width: 4),
-          ],
         ],
       ),
     );
   }
 
-  Widget _buildBody(ThemeData theme) {
+  Widget _buildPopupMenuChild(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            text,
+            style: const TextStyle(height: 1),
+            strutStyle: const StrutStyle(height: 1, leading: 0),
+          ),
+          Icon(
+            size: 18,
+            Icons.keyboard_arrow_down,
+            color: colorScheme.onSurfaceVariant,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
     final episodes = widget.episodes;
     return Expanded(
       child: Material(
@@ -187,7 +226,6 @@ class _DownloadPanelState extends State<DownloadPanel> {
                   final hasParts =
                       episode is ugc.EpisodeItem && episode.pages!.length > 1;
                   Widget child = _buildItem(
-                    theme: theme,
                     index: index,
                     hasParts: hasParts,
                     episode: episode,
@@ -276,26 +314,33 @@ class _DownloadPanelState extends State<DownloadPanel> {
       switch (episode) {
         case Part part:
           _downloadService.downloadVideo(
-            part,
-            parent == null ? widget.videoDetail : null,
-            parent,
-            _quality,
+            index: index,
+            page: part,
+            videoDetail: parent == null ? widget.videoDetail : null,
+            videoArc: parent,
+            videoQuality: _quality,
+            audioQuality: _audioQuality,
+            seasonInfo: widget.videoDetail?.seasonInfo(index),
           );
           break;
         case ugc.EpisodeItem episode:
           _downloadService.downloadVideo(
-            episode.pages!.first,
-            null,
-            episode,
-            _quality,
+            index: index,
+            page: episode.pages!.first,
+            videoDetail: null,
+            videoArc: episode,
+            videoQuality: _quality,
+            audioQuality: _audioQuality,
+            seasonInfo: widget.videoDetail?.seasonInfo(index),
           );
           break;
         case pgc.EpisodeItem episode:
           _downloadService.downloadBangumi(
-            index,
-            widget.pgcItem!,
-            episode,
-            _quality,
+            index: index,
+            pgcItem: widget.pgcItem!,
+            episode: episode,
+            quality: _quality,
+            audioQuality: _audioQuality,
           );
           break;
       }
@@ -309,7 +354,6 @@ class _DownloadPanelState extends State<DownloadPanel> {
   }
 
   Widget _buildItem({
-    required ThemeData theme,
     required int index,
     required bool hasParts,
     required bool isCurrentIndex,
@@ -366,7 +410,7 @@ class _DownloadPanelState extends State<DownloadPanel> {
         cacheWidth = item.dimension?.cacheWidth;
         break;
     }
-    late final primary = theme.colorScheme.primary;
+    late final primary = colorScheme.primary;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
@@ -448,8 +492,6 @@ class _DownloadPanelState extends State<DownloadPanel> {
                                     title,
                                     textAlign: TextAlign.start,
                                     style: TextStyle(
-                                      fontSize:
-                                          theme.textTheme.bodyMedium!.fontSize,
                                       height: 1.42,
                                       letterSpacing: 0.3,
                                       fontWeight: isCurrentIndex
@@ -468,7 +510,7 @@ class _DownloadPanelState extends State<DownloadPanel> {
                                     style: TextStyle(
                                       fontSize: 12,
                                       height: 1,
-                                      color: theme.colorScheme.outline,
+                                      color: colorScheme.outline,
                                       overflow: TextOverflow.clip,
                                     ),
                                   ),
@@ -496,7 +538,7 @@ class _DownloadPanelState extends State<DownloadPanel> {
                                 right: 0,
                                 child: Icon(
                                   size: 13,
-                                  color: theme.colorScheme.secondary.withValues(
+                                  color: colorScheme.secondary.withValues(
                                     alpha: 0.8,
                                   ),
                                   FontAwesomeIcons.circleDown,
@@ -516,9 +558,9 @@ class _DownloadPanelState extends State<DownloadPanel> {
     );
   }
 
-  Widget _buildFooter(ThemeData theme, Color dividerColor) {
-    return Container(
-      color: theme.hoverColor,
+  Widget _buildFooter(Color dividerColor) {
+    return Ink(
+      color: colorScheme.surfaceContainer,
       padding: EdgeInsets.only(
         bottom: MediaQuery.viewPaddingOf(context).bottom,
       ),

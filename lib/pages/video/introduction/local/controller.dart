@@ -2,7 +2,7 @@ import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart';
 import 'package:PiliPlus/models_new/video/video_detail/stat_detail.dart';
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
-import 'package:PiliPlus/pages/download/controller.dart';
+import 'package:PiliPlus/pages/download/download/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -57,14 +57,17 @@ class LocalIntroController extends CommonIntroController {
   void onInit() {
     super.onInit();
     videoDetail.value.title = videoDetailCtr.args['title'];
-    final controller = Get.find<DownloadPageController>();
+    final controller = Get.find<DownloadController>();
     final list = <BiliDownloadEntryInfo>[];
-    for (final e in controller.pages) {
-      final items = e.entries..sort((a, b) => a.sortKey.compareTo(b.sortKey));
-      final completed = items.where((e) => e.isCompleted);
-      list.addAllIf(completed.isNotEmpty, completed);
-      if (completed.length == 1) {
-        aidSet.add(e.pageId);
+    // 上游 2.2.0：下载列表改为「季 -> 页 -> 条目」三级结构。
+    for (final season in controller.seasons) {
+      for (final page in season.pages) {
+        final items = page.entries..sort(downloadEntrySort);
+        final completed = items.where((e) => e.isCompleted);
+        list.addAllIf(completed.isNotEmpty, completed);
+        if (completed.length == 1) {
+          aidSet.add(page.pageId);
+        }
       }
     }
     this.list.value = list;

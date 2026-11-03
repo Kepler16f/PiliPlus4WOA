@@ -39,6 +39,10 @@ abstract final class DownloadHttp {
     );
     if (res case Success(:final response)) {
       final dash = response.dash;
+
+      // segments
+      entry.segments = response.clipInfoList;
+
       if (dash != null) {
         final (
           int targetQuality,
@@ -76,11 +80,13 @@ abstract final class DownloadHttp {
           dashDrmType: 0,
         );
         List<Type2File>? audioFileList;
-        final List<AudioItem>? audioDashList = dash.audio;
-        if (audioDashList != null && audioDashList.isNotEmpty) {
+        final List<AudioItem>? audioList = dash.audio;
+        if (audioList != null && audioList.isNotEmpty) {
+          final preferAudioQa =
+              entry.preferedAudioQuality ?? Pref.defaultAudioQa;
           final audioDash = VideoUtils.findTargetAudio(
-            audioDashList,
-            Pref.defaultAudioQa,
+            audioList,
+            preferAudioQa,
           );
           final audioUrl = VideoUtils.getCdnUrl(
             audioDash.playUrls,
