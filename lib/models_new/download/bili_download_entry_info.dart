@@ -1,5 +1,8 @@
 import 'dart:io' show Platform, Process;
 
+import 'package:PiliPlus/common/widgets/badge.dart';
+import 'package:PiliPlus/models/common/badge_type.dart';
+import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/pages/common/multi_select/base.dart'
     show MultiSelectData;
@@ -58,6 +61,17 @@ class BiliDownloadEntryInfo with MultiSelectData {
     }
     return title;
   }
+
+  /// 下载项画质角标（上游 a0bcdba8b）
+  Widget get qaBadge => PBadge(
+    text: videoQuality != null
+        ? VideoQuality.safeFromCode(videoQuality!)?.shortDesc ??
+              qualityPithyDescription
+        : qualityPithyDescription,
+    right: 6.0,
+    top: 6.0,
+    type: PBadgeType.gray,
+  );
 
   Widget moreBtn(ColorScheme colorScheme) => SizedBox(
     width: 29,
