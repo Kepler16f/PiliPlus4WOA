@@ -260,7 +260,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     });
   }
 
-  int? tmpSubtitlePaddingB;
   StreamSubscription? _controlsListener;
   void _onControlChanged(bool val) {
     final visible = val && !plPlayerController.controlsLock.value;
@@ -289,22 +288,32 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     if (widget.videoDetailController case final controller?) {
       if (controller.vttSubtitlesIndex.value != 0) {
         if (visible) {
-          const int minPadding = 70;
-          if (plPlayerController.subtitlePaddingB < minPadding) {
-            tmpSubtitlePaddingB = plPlayerController.subtitlePaddingB;
-            plPlayerController
-              ..subtitlePaddingB = minPadding
-              ..subtitleConfig.value = plPlayerController.getSubConfig;
-          }
+          _adjustSubPaddingIfNeeded();
         } else {
-          if (tmpSubtitlePaddingB != null) {
-            plPlayerController
-              ..subtitlePaddingB = tmpSubtitlePaddingB!
-              ..subtitleConfig.value = plPlayerController.getSubConfig;
-            tmpSubtitlePaddingB = null;
-          }
+          _resetSubPaddingIfNeeded();
         }
       }
+    }
+  }
+
+  // 控制条显示时把字幕上抬，避免被进度条压住；隐藏后恢复用户设置。
+  // 上游 fix #3323 把临时值挪到控制器上，这样窗口内边距变化时能统一作废。
+  void _adjustSubPaddingIfNeeded() {
+    const int minPadding = 70;
+    if (plPlayerController.subtitlePaddingB < minPadding) {
+      plPlayerController
+        ..tmpSubtitlePaddingB = plPlayerController.subtitlePaddingB
+        ..subtitlePaddingB = minPadding
+        ..updateSubtitleStyle();
+    }
+  }
+
+  void _resetSubPaddingIfNeeded() {
+    if (plPlayerController.tmpSubtitlePaddingB != null) {
+      plPlayerController
+        ..subtitlePaddingB = plPlayerController.tmpSubtitlePaddingB!
+        ..updateSubtitleStyle();
+      plPlayerController.tmpSubtitlePaddingB = null;
     }
   }
 
