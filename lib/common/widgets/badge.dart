@@ -42,53 +42,53 @@ class PBadge extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final colorScheme = ColorScheme.of(context);
+    ColorScheme theme = Theme.of(context).colorScheme;
 
-    final Color bgColor;
-    final Color color;
+    Color bgColor;
+    Color color;
     Color borderColor = Colors.transparent;
 
     switch (type) {
       case PBadgeType.primary:
-        bgColor = colorScheme.primary;
-        color = colorScheme.onPrimary;
+        bgColor = theme.primary;
+        color = theme.onPrimary;
       case PBadgeType.secondary:
-        bgColor = colorScheme.secondaryContainer.withValues(alpha: 0.5);
-        color = colorScheme.onSecondaryContainer;
+        bgColor = theme.secondaryContainer.withValues(alpha: 0.5);
+        color = theme.onSecondaryContainer;
       case PBadgeType.gray:
         bgColor = Colors.black45;
         color = Colors.white;
       case PBadgeType.error:
-        if (colorScheme.isDark) {
-          bgColor = colorScheme.errorContainer;
-          color = colorScheme.onErrorContainer;
+        if (theme.isDark) {
+          bgColor = theme.errorContainer;
+          color = theme.onErrorContainer;
         } else {
-          bgColor = colorScheme.error;
-          color = colorScheme.onError;
+          bgColor = theme.error;
+          color = theme.onError;
         }
       case PBadgeType.line_primary:
-        color = colorScheme.primary;
+        color = theme.primary;
         bgColor = Colors.transparent;
-        borderColor = colorScheme.primary;
+        borderColor = theme.primary;
       case PBadgeType.line_secondary:
-        color = colorScheme.secondary;
+        color = theme.secondary;
         bgColor = Colors.transparent;
-        borderColor = colorScheme.secondary;
+        borderColor = theme.secondary;
       case PBadgeType.free:
-        bgColor = colorScheme.freeColor;
+        bgColor = theme.freeColor;
         color = Colors.white;
       case PBadgeType.shop:
-        bgColor = colorScheme.secondaryContainer.withValues(alpha: 0.5);
-        color = colorScheme.onSurfaceVariant;
+        bgColor = theme.secondaryContainer.withValues(alpha: 0.5);
+        color = theme.onSurfaceVariant;
     }
 
-    const defPaddingStyle = EdgeInsets.symmetric(vertical: 2, horizontal: 3);
+    late EdgeInsets paddingStyle = const .symmetric(vertical: 2, horizontal: 3);
     final BorderRadius br = size == .small
         ? const .all(.circular(3))
         : const .all(.circular(4));
 
     Widget content = Container(
-      padding: padding ?? defPaddingStyle,
+      padding: padding ?? paddingStyle,
       decoration: BoxDecoration(
         borderRadius: br,
         color: bgColor,

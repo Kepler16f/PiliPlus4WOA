@@ -1,11 +1,14 @@
-import 'package:flutter/widgets.dart';
+import 'package:material_ui/material_ui.dart';
 
 class StatefulBuilder extends StatefulWidget {
   const StatefulBuilder({
     super.key,
+    this.onInit,
     this.onDispose,
     required this.builder,
   });
+
+  final VoidCallback? onInit;
 
   final VoidCallback? onDispose;
 
@@ -16,6 +19,12 @@ class StatefulBuilder extends StatefulWidget {
 }
 
 class _StatefulBuilderState extends State<StatefulBuilder> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onInit?.call();
+  }
+
   @override
   void dispose() {
     widget.onDispose?.call();

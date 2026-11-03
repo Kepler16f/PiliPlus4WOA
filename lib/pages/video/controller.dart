@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:math' show min;
 import 'dart:ui';
 
@@ -21,9 +20,10 @@ import 'package:PiliPlus/models/common/sponsor_block/action_type.dart';
 import 'package:PiliPlus/models/common/sponsor_block/post_segment_model.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_model.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_type.dart';
-import 'package:PiliPlus/models/common/video/base_quality.dart';
+import 'package:PiliPlus/models/common/video/audio_quality.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
+import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
@@ -856,17 +856,15 @@ class VideoDetailController extends GetxController
     if (plPlayerController.enableSponsorBlock && isBlock && !fromReset) {
       querySponsorBlock(bvid: bvid, cid: cid.value);
     }
-    if (PlatformUtils.isMobile || Platform.isLinux) {
+    if (plPlayerController.cacheVideoQa == null) {
       final isWiFi = await ConnectivityUtils.isWiFi;
-      if (plPlayerController.cacheVideoQa == null) {
-        plPlayerController
-          ..cacheVideoQa = isWiFi
-              ? Pref.defaultVideoQa
-              : Pref.defaultVideoQaCellular
-          ..cacheAudioQa = isWiFi
-              ? Pref.defaultAudioQa
-              : Pref.defaultAudioQaCellular;
-      }
+      plPlayerController
+        ..cacheVideoQa = isWiFi
+            ? Pref.defaultVideoQa
+            : Pref.defaultVideoQaCellular
+        ..cacheAudioQa = isWiFi
+            ? Pref.defaultAudioQa
+            : Pref.defaultAudioQaCellular;
       preferCodecs = isWiFi ? Pref.preferCodecs : Pref.preferCodecsCellular;
     }
 

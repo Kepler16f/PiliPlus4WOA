@@ -424,7 +424,6 @@ class PlPlayerController with BlockConfigMixin {
   late double subtitleFontScale = Pref.subtitleFontScale;
   late double subtitleFontScaleFS = Pref.subtitleFontScaleFS;
   late int subtitlePaddingH = Pref.subtitlePaddingH;
-  int? tmpSubtitlePaddingB;
   late int subtitlePaddingB = Pref.subtitlePaddingB;
   late double subtitleBgOpacity = Pref.subtitleBgOpacity;
   final bool showVipDanmaku = Pref.showVipDanmaku; // loop unswitching
@@ -528,11 +527,7 @@ class PlPlayerController with BlockConfigMixin {
   }
 
   void onUpdatePadding(EdgeInsets padding) {
-    // 上游 fix #3323：窗口内边距变化后，之前为「控制条显示」临时抬高的字幕
-    // 底部间距必须作废，否则字幕会一直停在抬高后的位置。
-    tmpSubtitlePaddingB = null;
     subtitlePaddingB = padding.bottom.round().clamp(0, 200);
-    updateSubtitleStyle();
     putSubtitleSettings();
   }
 

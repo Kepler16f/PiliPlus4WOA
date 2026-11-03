@@ -1,8 +1,7 @@
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/video.dart';
 import 'package:PiliPlus/models/common/account_type.dart';
-import 'package:PiliPlus/models/common/video/base_quality.dart';
-import 'package:PiliPlus/models/common/video/video_decode_type.dart';
+import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
@@ -40,27 +39,29 @@ abstract final class DownloadHttp {
     if (res case Success(:final response)) {
       final dash = response.dash;
       if (dash != null) {
+        final videoList = dash.video!;
         final (
-          int targetQuality,
-          FormatItem targetFormat,
-          VideoDecodeFormatType targetDecode,
-          VideoItem videoDash,
+          targetVideoQa,
+          targetSupportFormats,
+          _,
+          videoDash,
         ) = VideoUtils.findTargetVideo(
-          dash.video!,
+          videoList,
           entry.preferedVideoQuality,
           response.acceptQuality,
           response.supportFormats!,
           Pref.preferCodecs,
         );
-        final videoUrl = VideoUtils.getCdnUrl(videoDash.playUrls);
 
         entry
-          ..typeTag = targetQuality.toString()
-          ..videoQuality = targetQuality
-          ..preferedVideoQuality = targetQuality
+          ..typeTag = targetVideoQa.toString()
+          ..videoQuality = targetVideoQa
+          ..preferedVideoQuality = targetVideoQa
           ..qualityPithyDescription =
-              targetFormat.displayDesc ??
-              VideoQuality.fromCode(targetQuality).shortDesc;
+              targetSupportFormats.displayDesc ??
+              VideoQuality.fromCode(targetVideoQa).shortDesc;
+
+        final videoUrl = VideoUtils.getCdnUrl(videoDash.playUrls);
 
         final Type2File videoFile = Type2File(
           id: videoDash.id,

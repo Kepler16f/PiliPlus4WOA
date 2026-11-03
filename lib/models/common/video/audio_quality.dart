@@ -1,10 +1,28 @@
-part of 'base_quality.dart';
+final class AudioQuality {
+  final int code;
+  final String desc;
 
-class AudioQuality extends BaseQuality {
   /// 音质优先级，数值越大音质越高。未知音质为 0。
   final int rank;
 
-  const AudioQuality(super.code, super.desc, {this.rank = 0});
+  const AudioQuality(this.code, this.desc, {this.rank = 0});
+
+  @override
+  String toString() => 'code: $code, desc: $desc';
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is AudioQuality) {
+      return code == other.code;
+    }
+    return false;
+  }
+
+  @override
+  int get hashCode => code.hashCode;
 
   static const AudioQuality hiRes = .new(30251, 'Hi-Res无损', rank: 60);
   static const AudioQuality dolby_30255 = .new(30255, '杜比全景声', rank: 50);
@@ -24,7 +42,7 @@ class AudioQuality extends BaseQuality {
 
   static final _codeMap = {for (final i in values) i.code: i};
 
-  AudioQuality.fromId(super.code) : rank = 0, super.fromId();
+  factory AudioQuality.fromId(int code) => AudioQuality(code, code.toString());
 
   factory AudioQuality.fromCode(int code) => _codeMap[code] ?? .fromId(code);
 }

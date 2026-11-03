@@ -1,7 +1,25 @@
-part of 'base_quality.dart';
+final class LiveQuality {
+  final int code;
+  final String desc;
 
-class LiveQuality extends BaseQuality {
-  const LiveQuality(super.code, super.desc);
+  const LiveQuality(this.code, this.desc);
+
+  @override
+  String toString() => 'code: $code, desc: $desc';
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) {
+      return true;
+    }
+    if (other is LiveQuality) {
+      return code == other.code;
+    }
+    return false;
+  }
+
+  @override
+  int get hashCode => code.hashCode;
 
   static const LiveQuality dolby = .new(30000, '杜比');
   static const LiveQuality origin4K = .new(25000, '4K 原画');
@@ -27,12 +45,12 @@ class LiveQuality extends BaseQuality {
 
   static final _codeMap = {for (final i in values) i.code: i};
 
-  LiveQuality.fromId(super.code) : super.fromId();
+  factory LiveQuality.fromId(int code) => LiveQuality(code, code.toString());
 
   factory LiveQuality.fromCode(int code) => _codeMap[code] ?? .fromId(code);
 
-  LiveQuality.fromJson(Map<String, dynamic> json)
-    : super(json['qn'] ?? -1, json['desc'] ?? json['qn'].toString());
+  factory LiveQuality.fromJson(Map<String, dynamic> json) =>
+      LiveQuality(json['qn'] ?? -1, json['desc'] ?? json['qn'].toString());
 
   factory LiveQuality.fromFormat(int code, List<LiveQuality>? liveQn) {
     if (liveQn != null && liveQn.isNotEmpty) {

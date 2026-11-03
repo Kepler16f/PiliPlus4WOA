@@ -6,7 +6,7 @@ import 'package:PiliPlus/grpc/bilibili/metadata/device.pb.dart';
 import 'package:PiliPlus/grpc/bilibili/metadata/fawkes.pb.dart';
 import 'package:PiliPlus/grpc/bilibili/metadata/locale.pb.dart';
 import 'package:PiliPlus/grpc/bilibili/metadata/network.pb.dart' as network;
-import 'package:PiliPlus/utils/accounts/account.dart';
+import 'package:PiliPlus/utils/login_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
 
 abstract final class GrpcHeaders {
@@ -16,6 +16,7 @@ abstract final class GrpcHeaders {
   static const _mobiApp = 'android_hd';
   static const _device = 'android';
 
+  static String get _buvid => LoginUtils.buvid;
   static String get _traceId => Constants.traceId;
   static String get _sessionId => Utils.generateRandomString(8);
 
@@ -26,8 +27,23 @@ abstract final class GrpcHeaders {
     'x-bili-gaia-vtoken': '',
     'x-bili-aurora-zone': '',
     'x-bili-trace-id': _traceId,
+    'buvid': _buvid,
     'bili-http-engine': 'cronet',
     // 'te': 'trailers', // dio not supported
+    'x-bili-device-bin': base64Encode(
+      Device(
+        appId: 5,
+        build: _build,
+        buvid: _buvid,
+        mobiApp: _mobiApp,
+        platform: _device,
+        channel: _biliChannel,
+        brand: _device,
+        model: _device,
+        osver: '15',
+        versionName: _versionName,
+      ).writeToBuffer(),
+    ),
     'x-bili-network-bin': base64Encode(
       network.Network(type: network.NetworkType.WIFI).writeToBuffer(),
     ),
@@ -49,35 +65,19 @@ abstract final class GrpcHeaders {
     ).writeToBuffer(),
   );
 
-  static Map<String, String> newHeaders(Account account) {
+  static Map<String, String> newHeaders([String? accessKey]) {
     return {
       ..._base,
-      if (account.accessKey != null)
-        'authorization': 'identify_v1 ${account.accessKey}',
-      'buvid': account.buvid,
+      if (accessKey != null) 'authorization': 'identify_v1 $accessKey',
       'x-bili-fawkes-req-bin': fawkes,
-      'x-bili-device-bin': base64Encode(
-        Device(
-          appId: 5,
-          build: _build,
-          buvid: account.buvid,
-          mobiApp: _mobiApp,
-          platform: _device,
-          channel: _biliChannel,
-          brand: _device,
-          model: _device,
-          osver: '15',
-          versionName: _versionName,
-        ).writeToBuffer(),
-      ),
       'x-bili-metadata-bin': base64Encode(
         Metadata(
-          accessKey: account.accessKey,
+          accessKey: accessKey,
           mobiApp: _mobiApp,
           device: _device,
           build: _build,
           channel: _biliChannel,
-          buvid: account.buvid,
+          buvid: _buvid,
           platform: _device,
         ).writeToBuffer(),
       ),
