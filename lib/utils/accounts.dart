@@ -3,7 +3,6 @@ import 'package:PiliPlus/models/common/account_type.dart';
 import 'package:PiliPlus/pages/mine/controller.dart';
 import 'package:PiliPlus/utils/accounts/account.dart';
 import 'package:PiliPlus/utils/login_utils.dart';
-import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:hive_ce/hive.dart';
 
 abstract final class Accounts {
@@ -12,8 +11,7 @@ abstract final class Accounts {
     AccountType.values.length,
     AnonymousAccount(),
   );
-  static bool get isMainVip => Pref.userInfoCache?.vipStatus == 1;
-  static bool get isVideoVip => main == video ? isMainVip : true;
+  static bool get mainEqVideo => main == video;
   static Account get main => accountMode[AccountType.main.index];
   static Account get video => accountMode[AccountType.video.index];
   static Account get heartbeat => accountMode[AccountType.heartbeat.index];

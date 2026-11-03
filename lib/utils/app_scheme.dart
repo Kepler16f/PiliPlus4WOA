@@ -127,7 +127,7 @@ abstract final class PiliScheme {
               bool isEp = path.contains('/ep/');
               PageUtils.viewPgc(
                 seasonId: isEp ? null : id,
-                epId: isEp ? .parse(id) : null,
+                epId: isEp ? id : null,
                 progress: _videoProgress(uri.queryParameters),
               );
               return true;

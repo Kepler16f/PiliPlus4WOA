@@ -2,6 +2,7 @@ import 'package:PiliPlus/grpc/bilibili/main/community/reply/v1.pb.dart'
     show MainListReply, ReplyInfo;
 import 'package:PiliPlus/grpc/reply.dart';
 import 'package:PiliPlus/http/loading_state.dart';
+import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models_new/dynamic/dyn_mention/item.dart';
 import 'package:PiliPlus/pages/common/reply/fold/reply_fold_mixin.dart';
 import 'package:PiliPlus/pages/common/reply/reply_controller.dart';
@@ -25,21 +26,25 @@ class VideoReplyController extends ReplyController<MainListReply>
         BaseReplyFoldMixin<MainListReply>,
         ReplyFoldMixin {
   VideoReplyController({
+    required this.aid,
+    required this.videoType,
     required this.heroTag,
   });
-  late final isPugv = videoCtr.videoType == .pugv;
+  int aid;
+  final VideoType videoType;
+  late final isPugv = videoType == VideoType.pugv;
 
   @override
-  int get oid => isPugv ? videoCtr.epId! : videoCtr.aid;
+  int get oid => isPugv ? videoCtr.epId! : aid;
 
   @override
-  int get replyType => videoCtr.videoType.replyType;
+  int get replyType => videoType.replyType;
 
   final String heroTag;
   late final videoCtr = Get.find<VideoDetailController>(tag: heroTag);
 
   @override
-  dynamic get sourceId => IdUtils.av2bv(videoCtr.aid);
+  dynamic get sourceId => IdUtils.av2bv(aid);
 
   @override
   void onAnimRootReply(ReplyInfo rootReply) {

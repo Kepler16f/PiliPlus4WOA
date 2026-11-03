@@ -25,13 +25,13 @@ import 'package:PiliPlus/models/common/super_resolution_type.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
+import 'package:PiliPlus/models_new/video/video_detail/ugc_season.dart';
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
 import 'package:PiliPlus/pages/danmaku/danmaku_model.dart';
 import 'package:PiliPlus/pages/live_room/widgets/bottom_control.dart'
     as live_bottom;
 import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
-import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/post_panel/popup_menu_text.dart';
 import 'package:PiliPlus/pages/video/post_panel/view.dart';
 import 'package:PiliPlus/pages/video/widgets/header_control.dart';
@@ -58,7 +58,6 @@ import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
-import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/mobile_observer.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
@@ -176,7 +175,15 @@ class PLVideoPlayer extends StatefulWidget {
   final Widget headerControl;
   final Widget? bottomControl;
   final Widget? danmuWidget;
-  final ugc.ShowEpisodes? showEpisodes;
+  final void Function([
+    int?,
+    UgcSeason?,
+    List<ugc.BaseEpisodeItem>?,
+    String?,
+    int?,
+    int?,
+  ])?
+  showEpisodes;
   final VoidCallback? showViewPoints;
   final Color fill;
   final Alignment alignment;
@@ -190,9 +197,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   late AnimationController _animationController;
   late VideoController videoController;
   late final CommonIntroController introController = widget.introController!;
-  PgcIntroController get pgcController => introController as PgcIntroController;
-  UgcIntroController get ugcController => introController as UgcIntroController;
-  late final videoDetailController = widget.videoDetailController!;
+  late final VideoDetailController videoDetailController =
+      widget.videoDetailController!;
 
   final _playerKey = GlobalKey();
   final _videoKey = GlobalKey();
@@ -737,15 +743,40 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
           }
           // part -> playAll -> season(pgc)
           if (isPlayAll && !isPart) {
-            widget.showEpisodes?.call(type: null);
+            widget.showEpisodes?.call();
             return;
           }
+          int? index;
+          int currentCid = plPlayerController.cid!;
+          String bvid = plPlayerController.bvid;
+          List<ugc.BaseEpisodeItem> episodes = [];
+          if (isSeason) {
+            final sections = videoDetail.ugcSeason!.sections!;
+            for (int i = 0; i < sections.length; i++) {
+              final episodesList = sections[i].episodes!;
+              for (final item in episodesList) {
+                if (item.cid == currentCid) {
+                  index = i;
+                  episodes = episodesList;
+                  break;
+                }
+              }
+            }
+          } else if (isPart) {
+            episodes = videoDetail.pages!;
+          } else if (isPgc) {
+            episodes =
+                (introController as PgcIntroController).pgcItem.episodes!;
+          }
           widget.showEpisodes?.call(
-            type: isSeason
-                ? .season
-                : isPgc
-                ? .pgc
-                : .part,
+            index,
+            isSeason ? videoDetail.ugcSeason! : null,
+            isSeason ? null : episodes,
+            bvid,
+            IdUtils.bv2av(bvid),
+            isSeason && isPart
+                ? videoDetailController.seasonCid ?? currentCid
+                : currentCid,
           );
         },
       ),

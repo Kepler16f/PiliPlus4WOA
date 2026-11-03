@@ -129,8 +129,8 @@ class _VideoReplyPanelState extends State<VideoReplyPanel>
                   feedBack();
                   controller.onReply(
                     null,
-                    oid: controller.videoCtr.aid,
-                    replyType: controller.replyType,
+                    oid: controller.aid,
+                    replyType: controller.videoType.replyType,
                   );
                 },
                 tooltip: '发表评论',
@@ -187,8 +187,8 @@ class _VideoReplyPanelState extends State<VideoReplyPanel>
                   onToggleTop: (item) => controller.onToggleTop(
                     item,
                     index,
-                    controller.videoCtr.aid,
-                    controller.replyType,
+                    controller.aid,
+                    controller.videoType.replyType,
                   ),
                 );
                 if (item.id == controller.targetRootRpId) {

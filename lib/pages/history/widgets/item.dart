@@ -45,7 +45,7 @@ class HistoryItem extends StatelessWidget {
       child: InkWell(
         onTap: enableMultiSelect
             ? () => ctr.onSelect(item)
-            : () => onPushHistory(item, business),
+            : () => onPushHistory(item),
         onLongPress: onLongPress,
         onSecondaryTap: PlatformUtils.isMobile ? null : onLongPress,
         child: Stack(
@@ -75,7 +75,7 @@ class HistoryItem extends StatelessWidget {
                               width: maxWidth,
                               height: maxHeight,
                             ),
-                            ?item.label(context, hasDuration, business),
+                            ?item.label,
                             if (hasDuration)
                               ...item.progressIndicator(theme.colorScheme),
                             Positioned.fill(
@@ -216,7 +216,8 @@ class HistoryItem extends StatelessWidget {
   }
 }
 
-Future<void> onPushHistory(HistoryItemModel item, String? business) async {
+Future<void> onPushHistory(HistoryItemModel item) async {
+  final business = item.history.business;
   if (business?.contains('article') == true) {
     PageUtils.toDupNamed(
       '/articlePage',

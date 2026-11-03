@@ -26,7 +26,7 @@ class VideoCardVMemberHome extends StatelessWidget {
     String? goto = videoItem.goto;
     switch (goto) {
       case 'bangumi':
-        PageUtils.viewPgc(epId: int.tryParse(videoItem.param ?? ''));
+        PageUtils.viewPgc(epId: videoItem.param);
         break;
 
       case 'av':

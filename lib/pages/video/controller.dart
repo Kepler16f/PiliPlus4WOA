@@ -91,9 +91,6 @@ class VideoDetailController extends GetxController
   late final String heroTag;
   late final RxString cover;
 
-  // 上游 2.2.0：番剧/合集面板需要直接访问 UGC 的选集状态
-  late final ugcIntroCtr = Get.find<UgcIntroController>(tag: heroTag);
-
   // 视频类型 默认投稿视频
   late final VideoType videoType;
   @override
@@ -181,6 +178,9 @@ class VideoDetailController extends GetxController
   ScrollController? introScrollCtr;
   ScrollController get effectiveIntroScrollCtr =>
       introScrollCtr ??= ScrollController();
+
+  int? seasonCid;
+  late final RxInt seasonIndex = 0.obs;
 
   PlayerStatus? playerStatus;
 
@@ -375,6 +375,8 @@ class VideoDetailController extends GetxController
       if (!isLoginVideo) {
         _actualVideoType = VideoType.ugc;
       }
+    } else if (args['pgcApi'] == true) {
+      _actualVideoType = VideoType.pgc;
     }
 
     bvid = args['bvid'];
@@ -493,7 +495,9 @@ class VideoDetailController extends GetxController
                 (sourceType == SourceType.fav && args['isOwner'] == true)
             ? (item, index) async {
                 if (sourceType == SourceType.watchLater) {
-                  final res = await UserHttp.toViewDel(aids: item.aid!);
+                  final res = await UserHttp.toViewDel(
+                    aids: item.aid.toString(),
+                  );
                   if (res.isSuccess) {
                     mediaList.removeAt(index);
                   }
@@ -1488,8 +1492,9 @@ class VideoDetailController extends GetxController
           .followedBy(downloadService.waitDownloadQueue)
           .map((e) => e.cid)
           .toSet();
-      final targetCid = isUgc ? ugcIntroCtr.seasonCid ?? cid.value : cid.value;
-      final index = episodes.indexWhere((e) => e.cid == targetCid);
+      final index = episodes.indexWhere(
+        (e) => e.cid == (seasonCid ?? cid.value),
+      );
 
       showModalBottomSheet(
         context: context,

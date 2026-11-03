@@ -1,299 +1,286 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:PiliPlus/common/assets.dart';
-import 'package:PiliPlus/models_new/video/video_detail/episode.dart';
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
+import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
-import 'package:PiliPlus/utils/scroll_offset_helper.dart';
+import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
-class PagePanel extends StatefulWidget {
-  const PagePanel({
+// TODO refa
+class PagesPanel extends StatefulWidget {
+  const PagesPanel({
     super.key,
-    this.parts,
-    this.bvid,
+    this.list,
     this.cover,
-
-    this.cidSet,
-    this.onDownload,
-
-    this.onBack,
-    this.showList = true,
-
+    required this.bvid,
+    required this.heroTag,
     this.showEpisodes,
     required this.ugcIntroController,
+    this.onDownload,
+    this.cidSet,
   });
 
-  final String? bvid;
+  final List<Part>? list;
   final String? cover;
-  final List<Part>? parts;
+
+  final String bvid;
+  final String heroTag;
+  final Function? showEpisodes;
+  final UgcIntroController ugcIntroController;
 
   final Set<int>? cidSet;
   final bool Function(Part part)? onDownload;
 
-  final bool showList; // ugc side panel
-  final VoidCallback? onBack; // episode panel
-
-  final ShowEpisodes? showEpisodes;
-  final UgcIntroController ugcIntroController;
-
   @override
-  State<PagePanel> createState() => _PagePanelState();
+  State<PagesPanel> createState() => _PagesPanelState();
 }
 
-class _PagePanelState extends State<PagePanel> {
-  String? _bvid;
-  late List<Part> _parts;
-  late bool _isCurr;
-  int get _index => _ugcController.partIndex;
-
-  late ColorScheme colorScheme;
+class _PagesPanelState extends State<PagesPanel> {
+  late int cid;
+  int pageIndex = -1;
+  late final VideoDetailController _videoDetailController;
   late final ScrollController _scrollController;
-  late final _ugcController = widget.ugcIntroController;
-  late final _videoDetailCtr = _ugcController.videoDetailCtr;
+  StreamSubscription? _listener;
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    colorScheme = .of(context);
-  }
+  List<Part> get pages =>
+      widget.list ?? widget.ugcIntroController.videoDetail.value.pages!;
 
-  @override
-  void didUpdateWidget(PagePanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.parts != oldWidget.parts) {
-      _reset();
-    }
-  }
-
-  @override
-  void dispose() {
-    _ugcController.indexNotifier.removeListener(_listener);
-    _scrollController.dispose();
-    super.dispose();
+  void _updatePageIndex() {
+    pageIndex = max(0, pages.indexWhere((e) => e.cid == cid));
   }
 
   @override
   void initState() {
     super.initState();
-    _reset();
-    _scrollController = ScrollController(keepScrollOffset: false);
-    if (_isCurr && _index > 0) {
-      WidgetsBinding.instance.addPostFrameCallback(_jumpToCurrent);
-    }
-  }
-
-  void _jumpToCurrent([_, bool anim = false]) {
-    final position = _scrollController.position;
-    final scrollOffset = calcPageItemOffset(
-      index: _index,
-      itemCount: _parts.length,
-      viewportDimension: position.viewportDimension,
+    _videoDetailController = Get.find<VideoDetailController>(
+      tag: widget.heroTag,
     );
-    if (anim) {
-      position.animateTo(
-        scrollOffset,
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeInOut,
-      );
-    } else {
-      position.jumpTo(scrollOffset);
+    double offset = 0;
+    if (widget.list == null) {
+      cid = widget.ugcIntroController.cid.value;
+      _updatePageIndex();
+      offset = targetOffset;
+      _listener = _videoDetailController.cid.listen((cid) {
+        this.cid = cid;
+        _updatePageIndex();
+        if (!mounted) return;
+        setState(() {});
+        jumpToCurr();
+      });
     }
+    _scrollController = ScrollController(initialScrollOffset: offset);
   }
 
-  void _reset() {
-    if (_isCurr = widget.parts == null) {
-      _initIfNeeded();
-      _ugcController.indexNotifier.addListener(_listener);
-    } else {
-      _ugcController.indexNotifier.removeListener(_listener);
-      _parts = widget.parts!;
-    }
+  double get targetOffset {
+    const double itemWidth = 150;
+    return max(0, pageIndex * itemWidth - itemWidth / 2);
   }
 
-  (bool bvidChanged, bool dispose) _initIfNeeded() {
-    assert(_isCurr);
-    final videoDetail = _ugcController.videoDetail.rawValue;
-    if (!videoDetail.hasParts) return const (true, true);
-    final bvidChanged = _bvid != _videoDetailCtr.bvid;
-    _bvid = _videoDetailCtr.bvid;
-    _parts = videoDetail.pages!;
-    return (bvidChanged, false);
+  void jumpToCurr() {
+    if (!_scrollController.hasClients || pages.isEmpty) {
+      return;
+    }
+    _scrollController.animateTo(
+      targetOffset,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
   }
 
-  void _listener() {
-    final (bool bvidChanged, bool dispose) = _initIfNeeded();
-    if (dispose) return;
-    if (!mounted) return;
-    setState(() {});
-    if (bvidChanged) {
-      _jumpToCurrent();
-    } else {
-      _jumpToCurrent(null, true);
-    }
+  @override
+  void dispose() {
+    _listener?.cancel();
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final child = widget.showList
-        ? SizedBox(
-            height: 45,
-            child: ListView.builder(
-              padding: .zero,
-              itemExtent: kPageItemExtent,
-              itemCount: _parts.length,
-              scrollDirection: .horizontal,
-              controller: _scrollController,
-              physics: const AlwaysScrollableScrollPhysics(),
-              itemBuilder: (context, index) => _buildItem(index),
-            ),
-          )
-        : null;
-
-    if (widget.showEpisodes != null) {
-      final header = Padding(
-        padding: const .only(top: 8, bottom: 2),
-        child: Row(
-          mainAxisAlignment: .spaceBetween,
-          children: [
-            const Text('视频选集 '),
-            Expanded(
-              child: Text(
-                ' 正在播放：${_parts[_index].part}',
-                overflow: .ellipsis,
-                style: TextStyle(fontSize: 12, color: colorScheme.outline),
-              ),
-            ),
-            const SizedBox(width: 10),
-            SizedBox(
-              height: 34,
-              child: TextButton(
-                style: const ButtonStyle(
-                  padding: WidgetStatePropertyAll(.zero),
-                ),
-                onPressed: () => widget.showEpisodes!(type: .part),
-                child: Text(
-                  '共${_parts.length}集',
-                  style: const TextStyle(fontSize: 13),
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-      if (widget.showList) {
-        return Column(children: [header, child!]);
-      }
-      return header;
-    }
-
-    return child!;
-  }
-
-  Widget _buildItem(int index) {
-    final isCurr = _isCurr && _index == index;
-    final item = _parts[index];
-    return Container(
-      width: kPageItemExtent,
-      margin: index != _parts.length - 1 ? const .only(right: 10) : null,
-      child: Material(
-        color: colorScheme.onInverseSurface,
-        borderRadius: const .all(.circular(6)),
-        child: InkWell(
-          borderRadius: const .all(.circular(6)),
-          onTap: () {
-            if (widget.onDownload case final onDownload?) {
-              if (onDownload(item) && mounted) {
-                setState(() {});
-              }
-              return;
-            }
-            widget.onBack?.call();
-            if (isCurr) return;
-            _ugcController.onChangeEpisode(
-              item
-                ..bvid ??= widget.bvid
-                ..cover ??= widget.cover,
-            );
-          },
-          child: Stack(
-            clipBehavior: .none,
-            children: [
-              Positioned(
-                right: 0,
-                bottom: 0,
-                child: Container(
-                  padding: const .symmetric(horizontal: 4),
-                  decoration: BoxDecoration(
-                    color: colorScheme.secondaryContainer.withValues(
-                      alpha: .7,
-                    ),
-                    borderRadius: const .only(
-                      topLeft: .circular(2),
-                      bottomRight: .circular(6),
-                    ),
-                  ),
+    final colorScheme = ColorScheme.of(context);
+    return Column(
+      children: [
+        if (widget.showEpisodes != null)
+          Padding(
+            padding: const .only(top: 8, bottom: 2),
+            child: Row(
+              mainAxisAlignment: .spaceBetween,
+              children: [
+                const Text('视频选集 '),
+                Expanded(
                   child: Text(
-                    (index + 1).toString(),
-                    style: TextStyle(
-                      fontSize: 10.5,
-                      color: colorScheme.onSecondaryContainer,
+                    ' 正在播放：${pages[pageIndex].part}',
+                    overflow: .ellipsis,
+                    style: TextStyle(fontSize: 12, color: colorScheme.outline),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  height: 34,
+                  child: TextButton(
+                    style: const ButtonStyle(
+                      padding: WidgetStatePropertyAll(.zero),
+                    ),
+                    onPressed: () => widget.showEpisodes!(
+                      null,
+                      null,
+                      pages,
+                      widget.bvid,
+                      IdUtils.bv2av(widget.bvid),
+                      cid,
+                    ),
+                    child: Text(
+                      '共${pages.length}集',
+                      style: const TextStyle(fontSize: 13),
                     ),
                   ),
                 ),
-              ),
-              Padding(
-                padding: const .symmetric(horizontal: 8),
-                child: Align(
-                  alignment: .centerLeft,
-                  child: Text.rich(
-                    maxLines: 2,
-                    overflow: .ellipsis,
-                    style: TextStyle(
-                      height: 1.1,
-                      fontSize: 13,
-                      color: isCurr
-                          ? colorScheme.primary
-                          : colorScheme.onSurface,
-                    ),
-                    strutStyle: const .new(height: 1.1, fontSize: 13),
-                    TextSpan(
+              ],
+            ),
+          ),
+        SizedBox(
+          height: 45,
+          child: ListView.builder(
+            key: PageStorageKey(widget.bvid),
+            controller: _scrollController,
+            scrollDirection: .horizontal,
+            itemCount: pages.length,
+            itemExtent: 150,
+            padding: .zero,
+            itemBuilder: (context, index) {
+              bool isCurrentIndex = pageIndex == index;
+              final item = pages[index];
+              return Container(
+                width: 150,
+                margin: index != pages.length - 1
+                    ? const .only(right: 10)
+                    : null,
+                child: Material(
+                  color: colorScheme.onInverseSurface,
+                  borderRadius: const .all(.circular(6)),
+                  child: InkWell(
+                    borderRadius: const .all(.circular(6)),
+                    onTap: () {
+                      if (widget.onDownload case final onDownload?) {
+                        if (onDownload(item) && mounted) {
+                          setState(() {});
+                        }
+                        return;
+                      }
+                      if (widget.showEpisodes == null) {
+                        Get.back();
+                      }
+                      if (isCurrentIndex) return;
+                      widget.ugcIntroController.onChangeEpisode(
+                        item
+                          ..bvid ??= widget.bvid
+                          ..cover ??= widget.cover,
+                      );
+                      if (widget.list != null &&
+                          widget
+                                  .ugcIntroController
+                                  .videoDetail
+                                  .value
+                                  .ugcSeason !=
+                              null) {
+                        _videoDetailController.seasonCid = pages.first.cid;
+                      }
+                    },
+                    child: Stack(
+                      clipBehavior: .none,
                       children: [
-                        if (isCurr)
-                          WidgetSpan(
-                            alignment: .middle,
-                            child: Padding(
-                              padding: const .only(right: 6),
-                              child: Image.asset(
-                                Assets.livingStatic,
-                                color: colorScheme.primary,
-                                height: 12,
-                                cacheHeight: 12.cacheSize(context),
-                                semanticLabel: "正在播放：",
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            padding: const .symmetric(horizontal: 4),
+                            decoration: BoxDecoration(
+                              color: colorScheme.secondaryContainer.withValues(
+                                alpha: .7,
+                              ),
+                              borderRadius: const .only(
+                                topLeft: .circular(2),
+                                bottomRight: .circular(6),
                               ),
                             ),
-                          )
-                        else if (widget.cidSet?.contains(item.cid) ?? false)
-                          WidgetSpan(
-                            alignment: .middle,
-                            child: Icon(
-                              size: 13,
-                              color: colorScheme.secondary.withValues(
-                                alpha: .8,
+                            child: Text(
+                              (index + 1).toString(),
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                color: colorScheme.onSecondaryContainer,
                               ),
-                              FontAwesomeIcons.circleDown,
                             ),
                           ),
-                        TextSpan(text: item.part),
+                        ),
+                        Padding(
+                          padding: const .symmetric(horizontal: 8),
+                          child: Align(
+                            alignment: .centerLeft,
+                            child: Text.rich(
+                              maxLines: 2,
+                              overflow: .ellipsis,
+                              style: TextStyle(
+                                height: 1.1,
+                                fontSize: 13,
+                                color: isCurrentIndex
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface,
+                              ),
+                              strutStyle: const .new(
+                                height: 1.1,
+                                fontSize: 13,
+                              ),
+                              TextSpan(
+                                children: [
+                                  if (isCurrentIndex)
+                                    WidgetSpan(
+                                      alignment: .middle,
+                                      child: Padding(
+                                        padding: const .only(right: 6),
+                                        child: Image.asset(
+                                          Assets.livingStatic,
+                                          color: colorScheme.primary,
+                                          height: 12,
+                                          cacheHeight: 12.cacheSize(
+                                            context,
+                                          ),
+                                          semanticLabel: "正在播放：",
+                                        ),
+                                      ),
+                                    )
+                                  else if (widget.cidSet?.contains(
+                                        item.cid,
+                                      ) ??
+                                      false)
+                                    WidgetSpan(
+                                      alignment: .middle,
+                                      child: Icon(
+                                        size: 13,
+                                        color: colorScheme.secondary.withValues(
+                                          alpha: .8,
+                                        ),
+                                        FontAwesomeIcons.circleDown,
+                                      ),
+                                    ),
+                                  TextSpan(text: item.part),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ),
                 ),
-              ),
-            ],
+              );
+            },
           ),
         ),
-      ),
+      ],
     );
   }
 }
