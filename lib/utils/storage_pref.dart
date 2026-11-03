@@ -19,15 +19,13 @@ import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
 import 'package:PiliPlus/models/common/super_chat_type.dart';
 import 'package:PiliPlus/models/common/super_resolution_type.dart';
 import 'package:PiliPlus/models/common/theme/theme_type.dart';
-import 'package:PiliPlus/models/common/video/audio_quality.dart';
+import 'package:PiliPlus/models/common/video/base_quality.dart';
 import 'package:PiliPlus/models/common/video/cdn_type.dart';
-import 'package:PiliPlus/models/common/video/live_quality.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
-import 'package:PiliPlus/models/common/video/video_quality.dart';
 import 'package:PiliPlus/models/user/danmaku_rule.dart';
 import 'package:PiliPlus/models/user/info.dart';
-import 'package:PiliPlus/pages/setting/pages/fullscreen_sc.dart'
+import 'package:PiliPlus/pages/setting/pages/fullscreen_sc_size.dart'
     show kFullScreenSCWidth;
 import 'package:PiliPlus/plugin/pl_player/models/audio_output_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/bottom_progress_behavior.dart';
@@ -1026,14 +1024,11 @@ abstract final class Pref {
 
     value = _localCache.get(SettingBoxKey.buvid);
     if (value != null) {
-      _setting
-          .put(SettingBoxKey.buvid, value)
-          .whenComplete(() => _localCache.delete(SettingBoxKey.buvid));
-      return value;
-    }
-
-    if (value == null) {
-      buvid = value = LoginUtils.generateBuvid();
+      _setting.put(SettingBoxKey.buvid, value);
+      _localCache.delete(SettingBoxKey.buvid);
+    } else {
+      value = LoginUtils.generateBuvid();
+      GStorage.setting.put(SettingBoxKey.buvid, value);
     }
 
     return value;
@@ -1054,15 +1049,6 @@ abstract final class Pref {
     SettingBoxKey.fullScreenSCWidth,
     defaultValue: kFullScreenSCWidth,
   );
-
-  static bool get enableFullScreenSC =>
-      _setting.get(SettingBoxKey.enableFullScreenSC, defaultValue: true);
-
-  static double get fullScreenSCOpacity =>
-      _setting.get(SettingBoxKey.fullScreenSCOpacity, defaultValue: 1.0);
-
-  static double get fullScreenSCScale =>
-      _setting.get(SettingBoxKey.fullScreenSCScale, defaultValue: 1.0);
 
   static bool get minimizeOnExit =>
       _setting.get(SettingBoxKey.minimizeOnExit, defaultValue: true);
