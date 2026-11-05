@@ -875,7 +875,7 @@ abstract final class PiliScheme {
           showVoteDialog(
             Get.context!,
             voteId,
-            dynamicId: parseIntOrNull(dynamicId),
+            parseIntOrNull(dynamicId),
           );
           return true;
         }
