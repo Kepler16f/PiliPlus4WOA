@@ -328,12 +328,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     // If the notification.dragDetails is null, this scroll is not triggered by
     // user dragging. It may be a result of ScrollController.jumpTo or ballistic scroll.
     // In this case, we don't want to trigger the refresh indicator.
-    final bool isUserDrag =
-        (notification is ScrollStartNotification &&
-            notification.dragDetails != null) ||
-        (notification is ScrollUpdateNotification &&
-            notification.dragDetails != null);
-    if (!isUserDrag || notification.metrics.extentBefore != 0.0) {
+    if (notification.metrics.extentBefore != 0.0) {
       return false;
     }
 
@@ -344,6 +339,7 @@ class RefreshIndicatorState extends State<RefreshIndicator>
     // a refresh/snap that is still in progress.
     if (_status != null) {
       if (notification is ScrollStartNotification &&
+          notification.dragDetails != null &&
           (_status == RefreshIndicatorStatus.drag ||
               _status == RefreshIndicatorStatus.done ||
               _status == RefreshIndicatorStatus.canceled)) {
@@ -355,7 +351,14 @@ class RefreshIndicatorState extends State<RefreshIndicator>
       }
     }
 
-    return _start();
+    final bool isDownwardDrag =
+        (notification is OverscrollNotification &&
+            notification.dragDetails != null &&
+            notification.dragDetails!.delta.dy > 0) ||
+        (notification is ScrollUpdateNotification &&
+            notification.dragDetails != null &&
+            notification.dragDetails!.delta.dy > 0);
+    return isDownwardDrag && _start();
   }
 
   bool _handleScrollNotification(ScrollNotification notification) {
