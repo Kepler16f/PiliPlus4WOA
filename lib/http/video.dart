@@ -219,7 +219,7 @@ abstract final class VideoHttp {
       'ep_id': ?epid,
       'season_id': ?seasonId,
       'cid': cid,
-      'qn': qn,
+      'qn': qn ?? 80,
       // 获取所有格式的视频
       'fnval': 4048,
       'fourk': 1,
