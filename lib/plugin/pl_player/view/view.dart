@@ -57,8 +57,6 @@ import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
-import 'package:PiliPlus/utils/id_utils.dart';
-import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/mobile_observer.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
@@ -1182,7 +1180,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   //    里混进了我们自己造成的窗口位移，累加会变成负反馈（窗口只以半速跟随、
   //    一卡一卡）。W_new = W_now + (p_now - p_start) 里 W_now 项恰好抵消它。
   int? _pipPointer;
-  Offset? _pipDragPos;
   Offset? _pipDragStart;
   bool _pipDragging = false;
 
@@ -1191,8 +1188,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     _pipPointer = event.pointer;
     _pipDragStart = event.position;
     _pipDragging = false;
-    _pipDragPos = null;
-    windowManager.getPosition().then((pos) => _pipDragPos = pos);
     GestureBinding.instance.pointerRouter.addRoute(
       event.pointer,
       _onPipPointerEvent,
@@ -1205,19 +1200,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       if (start == null || !event.down) return;
       if (!_pipDragging) {
         // 阈值与 tap 的 slop 对齐：没超过就是「点击」，窗口不动，让按钮的 tap
-        // 正常触发；超过才算拖动。起点取越过阈值的这一刻，避免窗口跳一下。
+        // 正常触发；超过才算拖动。超过后交给操作系统原生拖动，避免连续 setPosition 阻塞事件循环。
         final slop = event.kind == PointerDeviceKind.mouse
             ? kPrecisePointerPanSlop
             : kTouchSlop;
         if ((event.position - start).distance < slop) return;
         _pipDragging = true;
-        _pipDragStart = event.position;
+        _stopPipDrag();
+        windowManager.startDragging();
         return;
       }
-      final pos = _pipDragPos;
-      if (pos == null) return;
-      _pipDragPos = pos + (event.position - start);
-      windowManager.setPosition(_pipDragPos!);
     } else if (event is PointerUpEvent || event is PointerCancelEvent) {
       _stopPipDrag();
     }
@@ -1234,7 +1226,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     }
     _pipDragStart = null;
     _pipDragging = false;
-    _pipDragPos = null;
   }
 
   void _onPanStart(ScaleStartDetails details) {
@@ -2418,6 +2409,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       _lastFramePixels = null;
       return;
     }
+    if (plPlayerController.isDesktopPip) {
+      _unchangedFrameSamples = 0;
+      _lastFramePixels = null;
+      return;
+    }
     if (!plPlayerController.playerStatus.isPlaying ||
         plPlayerController.isSeeking.value ||
         plPlayerController.isBuffering.value ||
@@ -2531,7 +2527,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   Future<void> screenshotWebp() async {
     final videoInfo = videoDetailController.data;
-    final ids = videoInfo.dash!.video!.map((i) => i.id!).toSet();
+    final ids = videoInfo.dash!.video!.map((i) => i.id).toSet();
     final video = videoDetailController.findVideoByQa(ids.min);
 
     VideoQuality qa = video.quality;

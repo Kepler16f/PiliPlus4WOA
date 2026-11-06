@@ -303,6 +303,12 @@ class PlPlayerController with BlockConfigMixin {
     isDesktopPip = false;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
+    final player = _videoPlayerController;
+    if (player is NativePlayer) {
+      try {
+        player.setProperty('framedrop', 'vo');
+      } catch (_) {}
+    }
     try {
       if (showWindowTitleBar) {
         await windowManager.setTitleBarStyle(TitleBarStyle.normal);
@@ -329,6 +335,12 @@ class PlPlayerController with BlockConfigMixin {
     isDesktopPip = true;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
+    final player = _videoPlayerController;
+    if (player is NativePlayer) {
+      try {
+        player.setProperty('framedrop', 'no');
+      } catch (_) {}
+    }
 
     try {
       _lastWindowBounds = await windowManager.getBounds();
@@ -910,6 +922,10 @@ class PlPlayerController with BlockConfigMixin {
     if (Platform.isWindows) {
       opt['keep-open'] = 'yes';
       opt['force-window'] = 'no';
+      opt['ao'] = 'wasapi';
+      opt['audio-stream-silence'] = 'yes';
+      opt['audio-exclusive'] = 'no';
+      opt['audio-client-name'] = 'PiliPlus';
     }
 
     // ARM64 修改版：关闭解码器**帧线程**（frame threading），规避播放中闪退。
@@ -1227,7 +1243,7 @@ class PlPlayerController with BlockConfigMixin {
       // 检查音频输出是否正常挂载，若未挂载则立即调度一次音频重载
       if (_playerCount != 0 && _hasAudioTrack()) {
         final ao = _mpvProp('current-ao');
-        if (ao == 'no' || ao == 'null') {
+        if (ao == null || ao == 'no' || ao == 'null') {
           _reloadAudioOutput();
         }
       }
@@ -1736,10 +1752,7 @@ class PlPlayerController with BlockConfigMixin {
         vfFps != null &&
         vfFps < containerFps * 0.5;
     final hasFreezeEvidence =
-        dropsGrowing ||
-        episodeDropsGrew ||
-        vfCollapsed ||
-        (isDesktopPip && _pictureFrozenCount >= 3);
+        dropsGrowing || episodeDropsGrew || vfCollapsed;
 
     // 整链重建的门槛：倍速播放时前移。
     // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建。
@@ -1947,16 +1960,43 @@ class PlPlayerController with BlockConfigMixin {
   /// 两者都**完全不动播放位置**，所以误判的代价只是一次无声的 AO 重建。
   void _reloadAudioOutput() {
     _audioStallGraceUntil = DateTime.now().add(const Duration(seconds: 4));
-    final device = _mpvProp('audio-device');
-    _mpvCommand(const ['audio-reload']);
     final player = _videoPlayerController;
     if (player is NativePlayer) {
       try {
+        final device = _mpvProp('audio-device');
         player.setProperty(
           'audio-device',
           (device == null || device.isEmpty) ? 'auto' : device,
         );
+        _mpvCommand(const ['ao-reload']);
+        player.setProperty('aid', 'no');
       } catch (_) {}
+      Future.delayed(const Duration(milliseconds: 100), () {
+        if (_playerCount == 0) return;
+        try {
+          final device = _mpvProp('audio-device');
+          player
+            ..setProperty(
+              'audio-device',
+              (device == null || device.isEmpty) ? 'auto' : device,
+            )
+            ..setProperty('aid', 'auto');
+          _mpvCommand(const ['ao-reload']);
+        } catch (_) {}
+        Timer(const Duration(milliseconds: 600), () {
+          if (_playerCount == 0 || isRecovering.value) return;
+          if (_hasAudioTrack()) {
+            final ao = _mpvProp('current-ao');
+            if (ao == null || ao == 'no' || ao == 'null') {
+              Utils.reportError(
+                'audio output still missing after ao-reload, escalating to reloadAtCurrentPosition',
+                null,
+              );
+              unawaited(_reloadAtCurrentPosition());
+            }
+          }
+        });
+      });
     }
   }
 
@@ -2198,7 +2238,7 @@ class PlPlayerController with BlockConfigMixin {
           // E（音频停摆）走自己的分支（见 _onVideoStalled）。
           kind: notPlayingStuck
               ? _StallKind.notPlaying
-              : audioStalled && !(dropping || outputStalled)
+              : audioStalled
               ? _StallKind.audioStalled
               : (dropping || outputStalled)
               ? _StallKind.dropping
