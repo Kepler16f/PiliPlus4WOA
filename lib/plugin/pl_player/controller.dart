@@ -779,19 +779,8 @@ class PlPlayerController with BlockConfigMixin {
       dataStatus.value = DataStatus.loading;
       // 初始化全屏方向
       _isVertical = isVertical ?? false;
-      // 换了片源 → 允许重新打一次管线快照（ready / t+6s）。
-      _loggedPipelineReady = false;
-      _pipelineReadyTicks = -1;
-      _pictureFrozenDrops = null;
-      _pictureEpisodeStartDrops = null;
-      _pictureFrozenCount = 0;
-      _pictureSurfaceRefreshCount = 0;
       // 换了片源 → 丢掉「长按持续后退」攒下来的目标位置（见 multiBackwardStart）。
       _multiBackwardTargetMs = null;
-      _resetStallWatchdogProgress();
-      // 换片源 → 重新开始「音频停摆」判定的宽限期（见 _audioStallGraceUntil）：
-      // 新片源刚 open，AO 还没挂上、audio-pts 还是 null，不能当成停摆。
-      _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
       _aid = aid;
       _bvid = bvid;
       this.cid = cid;
@@ -830,8 +819,6 @@ class PlPlayerController with BlockConfigMixin {
       if (autoFullScreenFlag && autoEnterFullScreen) {
         triggerFullScreen(status: true);
       }
-
-      _ensureStallWatchdog();
       await _initializePlayer();
       onInit?.call();
     } catch (err, stackTrace) {
@@ -1133,132 +1120,6 @@ class PlPlayerController with BlockConfigMixin {
     );
   }
 
-  /// 重开当前 URL 从当前位置续播，并且**让播放真正跑起来、完成后自动收尾**。
-  ///
-  /// 为什么不能直接用 [refreshPlayer]（2026-09-17 修）：
-  ///   - 它只调 `ctr.open(..., play: true)` 就返回。而 media_kit 的 `open()` 内部
-  ///     会先 `await stop(open: true)` 并**把 pause 置回 true**，最后才按 `play`
-  ///     参数解除暂停、再设 playlist-pos。这个链路上任何一步的时序抖动，都会
-  ///     留下「画面在走、声音没了」或「声音在走、画面没了」这种半截状态 ——
-  ///     正是用户报的现象之一。
-  ///   - 它不需要用户手势，但重开确实要重新缓冲；用户看到的是一段静止画面，
-  ///     所以必须配一个加载指示。
-  ///
-  /// 这里统一处理：置缓冲态 → 重开 → 显式恢复播放（[play] 会清 `_userPaused`）
-  /// → 等 `stream.playing` 真的变 true（最多 [_reloadConfirmTimeout]）→ 清缓冲态。
-  ///
-  /// 全程置 [isRecovering]，让自愈加载指示与常规缓冲指示**互斥**（见该字段注释）。
-  Future<void> _reloadAtCurrentPosition() async {
-    if (dataSource is FileSource) return;
-    // 已经有一次重开在跑：叠加第二次只会互相把 open() 打断（表现为声音没了/画面没了）。
-    if (isRecovering.value) return;
-    final ctr = _videoPlayerController;
-    if (ctr == null || ctr.current.isEmpty) return;
-    if (_videoController == null) return;
-    // 用户正在拖进度条：那是用户自己的操作，松手后由跳转流程接管，
-    // 这时候插一次重开会和拖动打架（也正是「自愈动画与拖动动画叠在一起」的来源之一）。
-    if (isSeeking.value) return;
-
-    isRecovering.value = true;
-    isBuffering.value = true;
-    _reloadWatchdog?.cancel();
-    // 重开期间 AO 会被拆掉重建，`current-ao` / `audio-pts` 会短暂缺失 ——
-    // 重置宽限期，免得把「正在重建」判成「音频停摆」而再叠一次自愈。
-    _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
-    try {
-      // 重开点**比当前位置往回一点**，不要正好停在当前位置（2026-09-18 按用户反馈改）。
-      //
-      // 为什么必须往回：卡死的本质是渲染链跟不上音频时钟、视频 pts 落在音频后面。
-      // 如果从「当前位置」重开，新管线一上来就顶在音频时钟上、甚至还在它后面 ——
-      // 一帧迟到就被丢，丢帧再让 pts 更落后，**刚刚重建完就立刻再次进入同一条
-      // 雪崩**（这也解释了为什么重建有时看起来「没救回来」）。
-      // 往回退一段等于给刚重建的管线一段缓冲，让它从从容的位置重新追上音频。
-      // 回退量按倍速放大（高倍速下音频时钟走得更快，同样的秒数只相当于更少的缓冲），
-      // 上限 8s：再大就不是「缓冲」而是明显倒退进度了。
-      final rawRewind = (3000 * _speedFactor).round();
-      final rewindMs = rawRewind < 3000
-          ? 3000
-          : (rawRewind > 8000 ? 8000 : rawRewind);
-      final startPos = ctr.state.position - Duration(milliseconds: rewindMs);
-      // open() 本身也套超时（2026-09-17 对抗验证补充）：如果 mpv 卡死，
-      // media_kit 的 open 链（stop(open:true) → loadfile）可能永不返回 ——
-      // 没有超时的话 finally 就永远不会执行，isRecovering/isBuffering 永久
-      // 停在 true，所有自愈路径（看门狗、onPictureFrozen、重入保护）全被禁用，
-      // 加载指示还会一直显示「正在恢复播放…」。超时后由 catch 清旗标，
-      // 交给既有的看门狗继续救；mpv 若事后才响应，播放恢复照常。
-      await ctr
-          .open(
-            ctr.current.last.copyWith(
-              start: startPos < Duration.zero ? Duration.zero : startPos,
-            ),
-            play: true,
-          )
-          .timeout(_reloadOpenTimeout);
-
-      // 显式再喊一次播放（await 确保命令下发并清理 _userPaused）。
-      await _startPlayback();
-
-      // 等待真正起播（位置推进，或 core-idle=no 且未暂停）。
-      // 循环中定期检查：若 mpv 被置为 pause=yes 或 playerStatus 变 paused，再次拉起 _startPlayback()。
-      // 在此期间 isRecovering.value 维持为 true，确保 view.dart 的采样器不会把网络加载期误判为画面冻结。
-      final initialPos = ctr.state.position.inMilliseconds;
-      final confirmStart = DateTime.now();
-      while (DateTime.now().difference(confirmStart) < _reloadConfirmTimeout) {
-        if (_playerCount == 0) break;
-        final mpvPause = _mpvProp('pause');
-        if (mpvPause == 'yes' || !playerStatus.isPlaying) {
-          await _startPlayback();
-        }
-        final currentPos = ctr.state.position.inMilliseconds;
-        final coreIdle = _mpvProp('core-idle');
-        final posAdvanced =
-            currentPos > initialPos && (currentPos - initialPos) >= 100;
-        final decoding = coreIdle == 'no' && mpvPause != 'yes';
-        if (posAdvanced || decoding) {
-          break;
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-      }
-    } catch (e) {
-      // 超时或播放器已释放：记一条，别让缓冲态卡住。
-      Utils.reportError(
-        'reload at current position did not confirm playing: $e',
-        null,
-      );
-    } finally {
-      if (_playerCount != 0) {
-        isBuffering.value = false;
-      }
-      isRecovering.value = false;
-      // 重开完成后，把下一次冻结自愈的冷却起点重置为当前时刻！
-      // 避免重开耗时吃掉冷却时间后，刚恢复又因第一帧延迟立刻再次触发冻结。
-      _lastPictureResyncAt = DateTime.now();
-      _lastStallRecoverAt = DateTime.now();
-
-      // 重开结束后再续一次音频宽限期（2026-10-01）：AO 是重开时才挂回来的，
-      // `current-ao` / `audio-pts` 会短暂缺失；续一次免得刚恢复就被判成「音频停摆」。
-      if (_playerCount != 0) {
-        _audioStallGraceUntil = DateTime.now().add(_audioStallGrace);
-      }
-      // 检查音频输出是否正常挂载，若未挂载则立即调度一次音频重载
-      if (_playerCount != 0 && _hasAudioTrack()) {
-        final ao = _mpvProp('current-ao');
-        if (ao == null || ao == 'no' || ao == 'null') {
-          _reloadAudioOutput();
-        }
-      }
-      // 兜底定时器：若 mpv 或状态仍停在暂停，再次拉起播放
-      if (_playerCount != 0) {
-        _reloadWatchdog = Timer(const Duration(milliseconds: 1000), () {
-          if (_playerCount == 0) return;
-          if (!playerStatus.isPlaying || _mpvProp('pause') == 'yes') {
-            _startPlayback();
-          }
-        });
-      }
-    }
-  }
-
   Future<void>? refreshPlayer() {
     if (dataSource is FileSource) {
       return null;
@@ -1324,12 +1185,7 @@ class PlPlayerController with BlockConfigMixin {
       'audio error recovery #$_audioErrorRecoverCount: $message',
       null,
     );
-    if (_audioErrorRecoverCount <= 1) {
-      _reloadAudioOutput();
-    } else {
-      _audioErrorRecoverCount = 0;
-      unawaited(_reloadAtCurrentPosition());
-    }
+    _reloadAudioOutput();
   }
 
   // 是否已有一次自动重连在进行中（防止重连风暴/重复重连）
@@ -1339,211 +1195,11 @@ class PlPlayerController with BlockConfigMixin {
   // 避免 CDN 短时间反复断流时触发重连风暴（每次重连失败都会堆积泄漏）。
   DateTime _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _reconnectCooldown = Duration(seconds: 10);
-  // 画面卡死看门狗：某些故障不触发任何 mpv 错误事件（无日志可匹配），
-  // 表现为「画面冻结、声音继续」。
-  //
-  // 为什么不能用 positionInMilliseconds（first attempt）：它对应 mpv 的
-  // time-pos，而 time-pos 在有音频时由**音频时钟**驱动
-  // （mpv player/command.c: get_current_time() 在 audio_status == STATUS_PLAYING
-  // 时返回 playing_audio_pts()）。画面冻结时音频照常播放、time-pos 一直推进，
-  // 比较 position 有没有变永远判不出来。
-  //
-  // 为什么也不能用 video-pts（second attempt）：本 mpv 构建（v0.41.0）的
-  // 属性表里**没有** video-pts（只有 audio-pts；video-frame-info 也不含 pts，
-  // 只有 picture-type / 各种 timecode）。上一版读的 video-pts 恒为空字符串，
-  // 于是看门狗每次都走「属性读不到 → 不判定」分支，**实际从未运行过** ——
-  // 崩溃日志里 0 条 'video stalled' 记录正好印证了这一点。
-  //
-  // 现在的判据：mpv 的 `frame-drop-count`（= vo_get_drop_count()）。已用实机日志
-  // 验证（2026-09-12 17:06:43，构建 7c42591b6）：
-  //   video stalled ... hwdec=d3d11va-copy vo=libmpv decoder-drop=0
-  //   vo-drop=95 vo-delayed=0 core-idle=no paused-for-cache=no state=playing
-  // 含义很明确：**解码器完全正常（decoder-drop=0），是渲染端没把帧画出来**。
-  //
-  // 出处是 mpv 自己的 vo_libmpv.c —— flip_page() 等客户端调用
-  // mpv_render_context_render() 最多等 200ms，超时就丢掉这一帧并
-  // vo_increment_drop_count(vo, 1)：
-  //     int64_t until = mp_time_ns() + MP_TIME_MS_TO_NS(200);
-  //     while (ctx->next_frame) { ... 超时 goto done ... }
-  //   done:
-  //     if (ctx->next_frame) { ...; vo_increment_drop_count(vo, 1); }
-  // 即 media_kit 的 ANGLE 渲染路径（VideoOutput::Render() → ANGLESurfaceManager
-  // ::Draw()，它与 Flutter 光栅线程里执行的 Read() 共用同一把内核 mutex）只要
-  // 有一次超过 200ms 没把帧交给 mpv，mpv 就丢帧；而视频 pts 一旦落到音频后面，
-  // 后续帧会持续「迟到」被丢，形成**不自愈的雪崩**（画面冻结、声音继续），直到
-  // 一次跳转/重载把 pts 重新对齐才恢复。这正好解释了两个现象：
-  //   - 「最小化窗口后更容易出现」：最小化/还原会让 Flutter 光栅线程停摆再恢复，
-  //     渲染端与它抢同一把锁、最容易超过 200ms；
-  //   - 「往回拖进度条就恢复」：跳转把视频 pts 重新对齐到音频，雪崩终止。
-  // 所以恢复手段首选**跳转**（便宜、不依赖网络），而不是重拉播放链接。
-  //
-  // 每 2s 采样一次，单个窗口增量 ≥ _stallDropDelta 记一次超标，连续
-  // _stallWindowThreshold 个窗口超标才判定卡死（约 4s，避免偶发抖动误判）。
-  // 跳转（isSeeking）或计数回退（mpv 重建 VO）时直接重置，不参与判定。
-  Timer? _stallWatchdog;
-  static const Duration _stallWatchdogPeriod = Duration(seconds: 2);
-  // 一个采样窗口（2s）内 VO 丢帧增量达到该值，即认为视频已经跟不上音频。
-  static const int _stallDropDelta = 10;
-  // 「最近 _stallWindowHistorySize 个窗口里有 _stallWindowThreshold 个异常」即判定卡死。
-  //
-  // ARM64 修改版（2026-09-14）：原来是「**连续** 2 个窗口异常」，已改成滑动窗口。
-  // 原因：用户报的卡死是断续的 —— 某些采样窗口刚好一次丢帧都没有，连续的判据
-  // 于是永远凑不齐，看门狗等于不存在（实测「最近一次卡住完全没有日志」就是它）。
-  static const int _stallWindowThreshold = 2;
-  static const int _stallWindowHistorySize = 3;
-  // 卡死恢复过一次之后，多久没有复发才让恢复阶梯回到第 1 级。
-  // 太短会让阶梯永远停在「往回跳 1s」上（每次卡→跳→好一个窗口→再卡→又从头开始），
-  // 救不回来时升不到 refreshPlayer / refreshPlayUrl。
-  static const Duration _stallEpisodeResetAfter = Duration(minutes: 2);
-  // 最近若干个采样窗口的判定结果（true = 该窗口异常）。
-  final List<bool> _stallWindowHistory = [];
-  int? _stallWatchdogLastDrops;
-  // 上一窗口的 time-pos（毫秒）。用于检测「本应播放但位置纹丝不动」
-  // （例如打开后一直 paused / paused-for-cache、或播放器根本没起播）。
-  int _stallWatchdogLastPosMs = -1;
-  // 上一窗口的 mpv `audio-pts`（字符串，mpv 直接给的就是这个）。
-  // 用于判「画面在走、声音没了」：音频时钟不再推进而画面照常 = 音频输出停摆。
-  // 用字符串原样比较即可，不用解析成数字 —— 只要「这一个窗口里它有没有变」。
-  String? _stallWatchdogLastAudioPts;
-  // 「音频停摆」判定的宽限期截止时刻。
-  //
-  // 起播/重开后的一小段时间里，mpv 还没把 AO 挂上、audio-pts 还是 null，
-  // 「AO 缺失 / 音轨读不到」的判据会**天然成立** —— 不加这段宽限，
-  // 每次起播都会被当成音频停摆并触发一次自愈。
-  // 由 setDataSource / _reloadAtCurrentPosition 重置为「现在 + _audioStallGrace」。
-  DateTime _audioStallGraceUntil = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _audioStallGrace = Duration(seconds: 8);
-  // 本次卡死开始时的累计丢帧数（只用于日志里给出「本段丢了多少帧」）。
-  int? _stallEpisodeDrops;
-  // 当前是否处于「画面卡住」状态。看门狗写入、_tryReconnect 读取，
-  // 用于区分「真的恢复了」和「音频在放但画面卡住」。
-  bool _videoStalled = false;
-  // 同一次卡死里已按「代价从低到高」尝试过几级恢复；画面恢复正常后清零。
-  int _stallRecoveryAttempts = 0;
-  // 卡死恢复自己的冷却（**不**共用 _reconnectCooldown）。
-  //
-  // 原来的实现让 _onVideoStalled 和 _scheduleReconnect 共用 _lastReconnectAt：
-  // 一次网络重连会顺带把接下来 10s 的卡死恢复一起压掉（反之亦然），
-  // 而断流与卡死本来就是两件独立的事、没有理由互相节流。
-  DateTime _lastStallRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
+  // 用户是否主动暂停过。play() 清、pause() 置。
 
-  /// 看门狗两级恢复之间的冷却（1x；倍速见 _stallCooldownNow）。
-  /// 2026-10-01 由 4s 收到 3s：它只节流「恢复动作」，不参与「判定」
-  /// （判定仍是 2s 窗口 + 滑动窗口计数），所以压低不会带来误判。
-  static const Duration _stallCooldown = Duration(seconds: 3);
-
-  // ── 倍速因子（ARM64 修改版，2026-09-17）─────────────────────────────────
-  //
-  // 用户报「三倍速播放长视频仍然画面卡死、声音继续」。倍速与卡死正相关的原因
-  // 早就确认过：倍速由音频时钟驱动，3 倍速时 mpv 必须每秒呈现 3 倍的帧，而
-  // WOA 上这条渲染链（hwdec=d3d11va-copy 的 GPU→CPU 回拷 + ANGLE 重新上传 +
-  // glFinish）本来就吃紧 —— 负载成正比上升，卡死概率也随之上升。
-  //
-  // 所以下面几处判定/恢复的节流都按倍速缩放，而不是用固定值：
-  //   - 卡死恢复的冷却缩到一半（3 倍速下 6s 的冷却 = 用户眼里的 18s 视频时间）；
-  //   - 冻结判定的冷却与升级阶梯提前（见 onPictureFrozen）；
-  //   - 第一级「往回跳」的回退量按倍速放大（1 倍速下 2s 的缓冲，在 3 倍速下
-  //     只相当于 0.67s，实测不足以脱离「帧持续迟到」的区间）。
-  double get _speedFactor {
-    final s = playbackSpeed;
-    return (s.isFinite && s > 1.0) ? s : 1.0;
-  }
-
-  /// 当前生效的卡死恢复冷却。倍速播放时缩短，让恢复动作更快接上。
-  Duration get _stallCooldownNow =>
-      _speedFactor >= 2.0 ? const Duration(seconds: 2) : _stallCooldown;
-  // 用户是否主动暂停过。看门狗据此区分「本该播放却起不来」和「用户就是想暂停」，
-  // 避免自动恢复把用户按下的暂停又给按回去。play() 清、pause() 置。
-  bool _userPaused = false;
-
-  // 自动重开的收尾定时器（见 _reloadAtCurrentPosition）。
-  Timer? _reloadWatchdog;
-
-  /// 重开时 `open()` 这条链本身的超时（stop(open:true) → loadfile）。
-  /// 它只负责「别让 open 永不返回」——open 返回不代表画面回来了。
-  static const Duration _reloadOpenTimeout = Duration(seconds: 6);
-
-  /// 重开后等 `stream.playing` 回调确认的时间（2026-10-01 按用户反馈拆出来）。
-  ///
-  /// 原来 open 和确认共用 4s。但这两件事的量级差很远：open 只是把命令发下去，
-  /// 确认要等「重新连接 → 重新缓冲 → 首帧出来 → 音频接上」。WOA + 慢 CDN 下
-  /// 这一步经常超过 4s，于是确认先超时 —— 代码判定「没救回来」，清掉
-  /// isRecovering/isBuffering，可播放器其实马上就要恢复了。后果有两个：
-  ///   1. 自愈加载指示提前消失，用户看到的是「闪一下圈又回到死图」；
-  ///   2. 状态机认为这一级失败，看门狗/冻结阶梯继续往上叠更重的动作
-  ///      （整链重开、重新拉流），越救越乱 —— 用户的原话就是
-  ///      「重建的反应不够快、回调的时间不够长」。
-  /// 给足 12s；真正卡死时仍由超时兜底，不会永久挂着（finally 照样清旗标）。
-  static const Duration _reloadConfirmTimeout = Duration(seconds: 12);
-
-  // ── 管线诊断（ARM64 修改版，2026-09-14）────────────────────────────────
-  // 为什么需要它：上一轮用户报「最近一次画面卡住完全没有日志」。原因很直接 ——
-  // 原来的日志**只在判定卡死成立时才写**，而判定本身依赖的判据一旦不成立
-  // （例如画面停住却一次丢帧都没有），就什么证据都不剩。
-  // 现在改成「不管判不判得出来，先把管线状态记下来」：
-  //   ready  ：纹理首次就绪的瞬间（每个视频一次）
-  //   t+6s   ：就绪 6s 后再记一条（能看到帧率/丢帧是否正常流动）
-  //   suspect：指标出现异常迹象（按 20s 节流）
-  // 这三条一起，能直接区分下面这些完全不同的病因：
-  //   - texture-id 一直是 null / rect 一直是 1x1 → 渲染端压根没建立（黑屏）
-  //   - vf-fps 塌到 ~0 而 core-idle=no → 输出链停摆（无声丢帧的卡死）
-  //   - frame-drop-count 攀升 → 渲染端来不及（经典丢帧卡死）
-  //   - width/height/rotate 异常 → 尺寸/旋转元数据问题
-  bool _loggedPipelineReady = false;
-  int _pipelineReadyTicks = -1;
-  DateTime _lastPipelineSuspicionAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _pipelineSuspicionCooldown = Duration(seconds: 20);
-  // 固定时间线：与「指标异常」无关，在播时定期记一条。
-  //
-  // 为什么必须无条件：实测那种「画面卡死」在 mpv 侧**完全没有信号** ——
-  // frame-drop-count 不涨、estimated-vf-fps 照常等于 container-fps、decoder-drop=0。
-  // 任何「按指标异常触发」的日志都抓不到它（上一版就是这么漏掉的，构建 5349 的日志里
-  // suspect/hidden-playing/texture-lost 一条都没有）。只有固定时间线才能事后比对出
-  // 「卡死发生在哪一刻、当时各指标是什么」。
-  DateTime _lastTimelineAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _pipelineTimelinePeriod = Duration(seconds: 30);
   // 已经下发过的视频输出表面尺寸，避免重复下发。
   int? _appliedSurfaceWidth;
   int? _appliedSurfaceHeight;
-  // 「画面冻结」判定的状态（见 onPictureFrozen）。
-  DateTime _lastPictureResyncAt = DateTime.fromMillisecondsSinceEpoch(0);
-  // 「像素冻结」两次自愈之间至少隔多久（1x；倍速方面见 onPictureFrozen ——
-  // 那里还会按倍速再压短：≥2x 为 2s、>1.5x 为 3s）。
-  // 历史：2026-09-18 10s → 6s → 4s（用户两次反馈「卡死重建时间有点长」），
-  //       2026-10-01 4s → 3s。这一次是配合采样周期 2s→1s（view.dart）：
-  //       一次冻结从「探测 ~6s + 冷却 4s」缩到「探测 ~3s + 冷却 3s」，重开这类
-  //       重动作大约快一倍到达。之所以值得动冷却，是因为实机日志里第 1 级
-  //       「重建输出表面」几乎救不回来（19 次冻结、18 次直接升级），真正有效的
-  //       就是这一级重开。
-  //     - 2026-10-23 反向调长 3s → 5s（同时 view.dart 的采样判定 2 次 → 3 次）：
-  //       用户反馈「重建时间间隔太短，老是误杀」。合法静止（定帧/黑场/字幕卡）
-  //       每个采样周期都「完全相同」，冷却越短 → 单位时间内被拆掉 AO/解码器/
-  //       表面的次数越多，而重开本身就是一次可感知卡顿。1x 现在走到整链重开约
-  //       「探测 ~4s + 冷却 5s」≈ 9s；且冷却再乘 (1+本段已重开次数)，反复误杀会
-  //       自行稀疏到 10/15/20s 一档。真冻结的响应代价可控（历史上「16s 内收敛」
-  //       本就是可接受的设计点）。判定逻辑本身未动。
-  // 下限不低于采样周期，避免同一个采样窗口里反复触发。
-  static const Duration _pictureResyncCooldown = Duration(seconds: 5);
-  // 短时间内连续冻结算同一次事故；隔久了重新计数。
-  int _pictureFrozenCount = 0;
-  // 本次事故里「只重建输出表面」（不做整链重开）已经做过几次。
-  // 用来给静态画面兜底：没有丢帧证据时最多重建一次，之后只记日志、
-  // 不再动播放位置，避免反复拆建表面把正常播放搅乱。
-  int _pictureSurfaceRefreshCount = 0;
-  // 本段事故里「整链重建」（_reloadAtCurrentPosition）已经做过几次。
-  // 每做一次就按倍数拉长下一次的冷却间隔 —— 否则在倍速播放下渲染链持续吃紧时，
-  // 会变成「刚重开完又冻结 → 又重开」的抖动，比卡住更难用。
-  int _pictureReloadCount = 0;
-  // 上一次冻结时的 vo-drop，用来判断「像素不变」到底是真冻结（在丢帧）
-  // 还是视频里本来就有静止画面（不丢帧 → 绝不能动播放位置）。
-  int? _pictureFrozenDrops;
-  int? _pictureEpisodeStartDrops;
-
-  // Rect 在 AOT 下 toString() 会打成 "Instance of 'Rect'"，所以自己拼数值。
-  static String _rectDesc(ui.Rect? r) => r == null
-      ? 'null'
-      : '${r.left.toInt()},${r.top.toInt()},'
-            '${r.width.toInt()}x${r.height.toInt()}';
 
   /// 把视频输出（ANGLE 表面 + Flutter 纹理）的尺寸设成 mpv 报的显示尺寸。
   ///
@@ -1652,13 +1308,7 @@ class PlPlayerController with BlockConfigMixin {
     }
     _appliedSurfaceWidth = w;
     _appliedSurfaceHeight = h;
-    // 窗口尺寸变化触发的表面重建（非 force 路径 = 由 setDisplayBox 驱动，例如
-    // 进/出 PiP、拖动窗口）：重建的那一两帧画面像素本就可能与上一帧相同，
-    // 给冻结判定一个与「用户拖动进度条」同级别的冷却，免得刚缩放完就被误判
-    // 成冻结、升级成真·重开（拆建 AO/解码器/表面），反而制造卡顿。
-    if (!force) {
-      _lastPictureResyncAt = DateTime.now();
-    }
+
     try {
       if (force) {
         final tmpW = w > 2 ? w - 2 : w + 2;
@@ -1671,219 +1321,7 @@ class PlPlayerController with BlockConfigMixin {
     } catch (_) {}
   }
 
-  /// 由画面像素采样发现「画面不再变化」时调用（见 PlVideoPlayer 的采样器）。
-  ///
-  /// 为什么必须靠像素：构建 5350 的实机日志证明，卡死时
-  /// `estimated-vf-fps` 照常 30、`decoder-drop=0`、`core-idle=no`、
-  /// `paused-for-cache=no`，demuxer 缓存稳定在 ~15s（= cache-secs 16，**没有溢出**）。
-  /// mpv 侧一切正常，唯一暴露它的信号就是「屏幕像素不再变化」。
-  ///
-  /// 关键旁证：用户反馈卡死时**弹幕照常跑**。弹幕是 Flutter 自己渲染的，
-  /// 说明光栅线程与合成器都健康 —— 断点只可能在「视频纹理这一条链路」上
-  /// （GpuSurfaceTexture 回调 → 共享句柄拷贝 → 引擎上传），而不是整个 UI 停摆，
-  /// 也不是解复用/缓存问题。
-  ///
-  /// 两种冻结在数据上完全不同，恢复手段也不同：
-  ///  A. vo-drop **持平**、vf-fps 正常：mpv 认为一切正常、帧也在出，只有屏幕不动
-  ///     → 断点在上述纹理链路，靠**重建表面**能救。
-  ///     实机 20:06:38 那次就是这样（vo-drop 停在 40 不动，冻结持续数分钟）。
-  ///  B. vo-drop 仍在**增长**：视频 pts 真在落后音频 → 跳转重新对齐即可。
-  ///
-  /// 恢复阶梯（每级有冷却，长时间不再冻则计数归零），**必须保证能收敛**：
-  ///   1 级：重建视频输出表面/纹理（不动播放位置）
-  ///   2 级：再叠一次「对齐到音频时钟的当前位置」（不是往回跳，音频不动，
-  ///         所以即使误判也只是原地重跳，不丢进度）
-  ///   3 级起：`_reloadAtCurrentPosition()` 重建整条解码+渲染链，然后计数归零
-  /// 之前这里 3 级以后会**永远**重复「重建表面 + 原地重跳」而从不升级，
-  /// 遇到真正被钉死的状态就会无限空转 —— 这是本次修的缺陷。
-  ///
-  /// 倍速播放（ARM64 修改版，2026-09-17）：阶梯整体提前、冷却缩短。
-  /// 实测「3 倍速播长视频仍会冻结」，而原阶梯在 3 倍速下要走
-  /// 10s 冷却 × 4 级 ≈ 40s 才升到整链重建 —— 用户在这 40s 里看的是一张死图，
-  /// 3 倍速下又相当于 120s 的视频时间。现在 >1.5 倍速时第 2 次冻结就直接
-  /// 整链重建。
-  /// 2026-09-18 再次提速：采样探测 ~4s（见 view.dart 的采样器）、1x 冷却 10s→6s、
-  /// 1x 升级门槛 4→3，正常倍速下一次完整冻结到整链重建 ≈ 16s 内收敛。
-  void onPictureFrozen() {
-    if (_playerCount == 0) return;
-    // 已经在自愈重开中：这次「像素没变」正是重开导致的，不要叠加动作。
-    if (isRecovering.value) return;
-    final now = DateTime.now();
-    // 用户刚拖完进度条：画面本来就要重新缓冲、位置也在重对齐，
-    // 这时插一次自愈重开会把用户拖到的位置冲掉（也会让两个加载指示叠在一起）。
-    if (now.difference(_lastUserSeekAt) < _userSeekGrace) return;
-    final sinceLast = now.difference(_lastPictureResyncAt);
-    // 冷却按倍速与已重开次数缩放：base（1x=5s / 1.5x 以上=4s / 2x 以上=3s，
-    // 2026-10-23 随「老是误杀」的反馈整体调长一档）
-    // × (1 + 本段已整链重建次数)，上限 4 倍。下限不低于采样周期，
-    // 否则会在同一个采样窗口里反复触发。
-    final baseCooldown = _speedFactor >= 2.0
-        ? 3
-        : (_speedFactor > 1.5 ? 4 : _pictureResyncCooldown.inSeconds);
-    final reloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
-    final cooldown = Duration(seconds: baseCooldown * (1 + reloads));
-    if (sinceLast < cooldown) return;
-    _lastPictureResyncAt = now;
 
-    // 距离上次很久 → 新的一次事故，重新计数。
-    if (sinceLast > _stallEpisodeResetAfter) {
-      _pictureFrozenCount = 0;
-      _pictureReloadCount = 0;
-      _pictureSurfaceRefreshCount = 0;
-      _pictureEpisodeStartDrops = null;
-    }
-    _pictureFrozenCount++;
-
-    final drops = _intProp('frame-drop-count') ?? 0;
-    if (_pictureFrozenCount == 1) {
-      _pictureEpisodeStartDrops = _stallWatchdogLastDrops ?? drops;
-    }
-    final prevDrops = _pictureFrozenDrops;
-    final dropsGrowing = prevDrops != null && drops > prevDrops;
-    _pictureFrozenDrops = drops;
-
-    final episodeDropsGrew =
-        _pictureEpisodeStartDrops != null && drops > _pictureEpisodeStartDrops!;
-    final vfFps = double.tryParse(_mpvProp('estimated-vf-fps') ?? '');
-    final containerFps = double.tryParse(_mpvProp('container-fps') ?? '');
-    final vfCollapsed =
-        containerFps != null &&
-        containerFps >= 15 &&
-        vfFps != null &&
-        vfFps < containerFps * 0.5;
-    final hasFreezeEvidence =
-        dropsGrowing || episodeDropsGrew || vfCollapsed;
-
-    // 整链重建的门槛：倍速播放时前移。
-    // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建。
-    // 2026-10-23：门槛不动，但采样判定多要一次、冷却加长到 5s，所以 1x 下一次冻结
-    // 约 9s（原 ~8s 且探测更短）才走到最重那一级 —— 误杀的代价比多等几秒更大。
-    // 整链重建只在有硬证据时允许：vo-drop 上涨说明 mpv 已经产出帧却送不出去，
-    // 这才是渲染链真的卡住。
-    //
-    // 没有丢帧证据时，画面不变更可能是视频本来就是静止画面（定帧、字幕卡、
-    // 片尾、黑场）。这种误判的代价是一次整链重开：拆 AO + 解码器 + 表面，
-    // 用户会看到进度被冲掉、缓冲指示重来一次，而且短时间内还会再冻再杀。
-    // 所以下面那条分支只做一次非破坏性的表面重建，绝不整链重开、绝不 seek。
-    final escalateAt = _speedFactor > 1.5 ? 1 : 2;
-    if (hasFreezeEvidence && _pictureFrozenCount >= escalateAt) {
-      _pictureFrozenCount = 0;
-      _pictureReloadCount++;
-      _pictureEpisodeStartDrops = null;
-      _pictureSurfaceRefreshCount = 0;
-      // next-cooldown 必须用自增后的 reloads（对抗验证抓到的 off-by-one）：
-      // 这次重开之后，下一次冻结的冷却间隔是按新计数算的。
-      final nextReloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
-      Utils.reportError(
-        'picture frozen: escalating to reloadAtCurrentPosition '
-        '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
-        'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
-        'speed=${playbackSpeed}x reloads=$_pictureReloadCount '
-        'next-cooldown=${baseCooldown * (1 + nextReloads)}s '
-        'time-pos=${positionInMilliseconds ~/ 1000}s)',
-        null,
-      );
-      _logPipelineSnapshot('picture-frozen');
-      unawaited(_reloadAtCurrentPosition());
-      return;
-    }
-
-    Utils.reportError(
-      'picture frozen #$_pictureFrozenCount: pixels unchanged '
-      '(vo-drop=$prevDrops->$drops vf-fps=${_mpvProp('estimated-vf-fps')} '
-      'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
-      'core-idle=${_mpvProp('core-idle')} '
-      'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
-      'speed=${playbackSpeed}x '
-      'time-pos=${positionInMilliseconds ~/ 1000}s '
-      'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}) '
-      '-> refresh video surface (no frame-drop evidence: treating as static picture)',
-      null,
-    );
-    _logPipelineSnapshot('picture-frozen');
-
-    // 只重建一次视频输出表面与纹理 —— 不动播放位置。
-    // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点，而且完全不动
-    // 播放位置，所以即使误判（静态画面）也只是白白重建一次表面。
-    if (_pictureSurfaceRefreshCount == 0) {
-      _pictureSurfaceRefreshCount++;
-      _applyVideoOutputSize(force: true);
-    } else if (_pictureSurfaceRefreshCount == 1) {
-      _pictureSurfaceRefreshCount++;
-      Utils.reportError(
-        'picture frozen: surface refresh did not unfreeze, attempting seek resync '
-        '(vo-drop=$prevDrops->$drops time-pos=${positionInMilliseconds ~/ 1000}s)',
-        null,
-      );
-      unawaited(seekTo(Duration(milliseconds: positionInMilliseconds), isSeek: false));
-    } else {
-      Utils.reportError(
-        'picture frozen: surface refreshed and resynced once, no further action '
-        '(vo-drop=$prevDrops->$drops time-pos=${positionInMilliseconds ~/ 1000}s)',
-        null,
-      );
-    }
-  }
-
-  // 记一条管线快照。tag 用于区分触发时机（见上面的说明）。
-  void _logPipelineSnapshot(String tag) {
-    Utils.reportError(
-      'pipeline[$tag]: '
-      // 实际生效的同步方式 / 解码方式 / 输出模块
-      'video-sync=${_mpvProp('video-sync')} '
-      'hwdec-current=${_mpvProp('hwdec-current')} '
-      'vo=${_mpvProp('current-vo')} '
-      // 帧率三件套：片源帧率、滤镜链产出帧率、显示器刷新率
-      'container-fps=${_mpvProp('container-fps')} '
-      'vf-fps=${_mpvProp('estimated-vf-fps')} '
-      'display-fps=${_mpvProp('display-fps')} '
-      'est-display-fps=${_mpvProp('estimated-display-fps')} '
-      // 计数类：丢帧 / 延迟帧 / 解码器丢帧
-      'vo-drop=${_mpvProp('frame-drop-count')} '
-      'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
-      'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
-      'mistimed=${_mpvProp('mistimed-frame-count')} '
-      // 尺寸与旋转：竖屏黑屏的关键证据。
-      // mpv 的 width/height 是解码尺寸，video-out-params/dw|dh 是显示尺寸，
-      // video-out-params/rotate 是旋转元数据 —— media_kit_video 原生侧正是拿
-      // 这三个值（dw/dh/rotate）算 ANGLE 表面尺寸的（rotate 为 90/270 时把 dw/dh
-      // 对调），所以这里必须照抄它的读法，才能判断出是不是那里算错了。
-      'mpv-width=${_mpvProp('width')} mpv-height=${_mpvProp('height')} '
-      'dw=${_mpvProp('video-out-params/dw')} dh=${_mpvProp('video-out-params/dh')} '
-      'rotate=${_mpvProp('video-out-params/rotate')} '
-      // 应用侧：纹理与矩形（null / 1x1 就说明渲染端没建立起来）
-      'texture-id=${_videoController?.id.value} '
-      'rect=${_rectDesc(_videoController?.rect.value)} '
-      // 应用侧：竖屏判定、画面适配方式、片源尺寸
-      'isVertical=$_isVertical videoFit=${videoFit.value.name} '
-      'src=${width}x$height '
-      // 视频轨是否被关掉 —— 「只有声音和弹幕、画面全黑」最直接的两个嫌疑：
-      //   唯一的「听视频」开关（onlyPlayAudio=true 时直接把音轨当片源打开），
-      //   以及 mpv 的 vid 属性（'no' 就表示视频轨被禁用）。
-      'onlyPlayAudio=${onlyPlayAudio.value} vid=${_mpvProp('vid')} '
-      'track-count=${_mpvProp('track-list/count')} '
-      // 播放状态与上下文
-      'state=${playerStatus.value} buffering=${isBuffering.value} '
-      // 用户报过「声音没有正常恢复，画面继续播放」。
-      // 下面这组就是专治这个的判据（2026-09-19 起还接了自愈，见 _StallKind.audioStalled）：
-      //   aid=no            → 当前选中的音频轨不存在
-      //   audio-pts 不动     → 音频时钟停了（画面还在走）
-      //   ao=no/null        → mpv 没挂上音频输出
-      'aid=${_mpvProp('aid')} audio-pts=${_mpvProp('audio-pts')} '
-      // 只记**存在**的属性：`audio-out-pts` / `last-audio-err` 在 mpv 0.41 的
-      // 属性表里根本没有（前者实测一直是 null），记它们只会污染日志 ——
-      // 与当年 `video-pts` 是同一个坑。改用有据可查的 current-ao / audio-device
-      // / audio-params：它们能回答「AO 还在不在、用的是哪个设备、格式对不对」。
-      'ao=${_mpvProp('current-ao')} '
-      'audio-device=${_mpvProp('audio-device')} '
-      'audio-params=${_mpvProp('audio-params')} '
-      'core-idle=${_mpvProp('core-idle')} '
-      'paused-for-cache=${_mpvProp('paused-for-cache')} '
-      'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
-      'lifecycle=${WidgetsBinding.instance.lifecycleState?.name}',
-      null,
-    );
-  }
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -1915,22 +1353,6 @@ class PlPlayerController with BlockConfigMixin {
     return raw == null ? null : int.tryParse(raw);
   }
 
-  /// 当前片源**是否有音轨**（而不是「音频轨此刻是否可用」）。
-  ///
-  /// 用 mpv 的 `track-list` 判断：只要存在 type=audio 的轨道就返回 true。
-  /// 为什么要单独判它 —— `aid` 属性在「当前选中的音频轨不存在」时返回 `no`，
-  /// 而**片源本身没有音轨**（纯静音视频）时同样恒为 `no`。两者在 aid 上长得
-  /// 一模一样，但含义完全相反：前者要自愈，后者（静音视频）绝不能碰。
-  /// `track-list` 才能区分它们。
-  ///
-  /// 读不到 track-list、或它的字符串形态里根本没有 `type=` 字段时返回 true：
-  /// 宁可让判据保留，也不因为读不到属性而把一整类问题静默压掉
-  /// —— 与 core-idle 用 `!= yes` 同一个取向。
-  bool _hasAudioTrack() {
-    final list = _mpvProp('track-list');
-    if (list == null || !list.contains('type=')) return true;
-    return list.contains('type=audio');
-  }
 
   /// 给 mpv 发一条命令（自愈用）。失败/播放器已释放时静默忽略。
   ///
@@ -1947,29 +1369,18 @@ class PlPlayerController with BlockConfigMixin {
   }
 
   /// 音频输出停摆时的最轻恢复：让 mpv 重建音频输出（AO）。
-  ///
-  /// 2026-09-19：对应「画面继续播放、声音没了」。
-  ///   - `audio-reload`：重载音频轨（实现上是卸载再重新加入），会把解码器与
-  ///     AO 一起重建（见 mpv input.rst 的 `audio-reload`，语义同 `sub-reload`）；
-  ///   - 再把 `audio-device` 写回当前值：手册（input.rst）明确写「写入该属性会
-  ///     把音频输出**调度为重载**」，是让 AO 重新初始化的官方途径。
-  ///     注意它「在 AO 未激活时不会自动启用音频」—— 所以两者都发，
-  ///     无论当前设备是否为 auto（默认多为 auto），重写该属性均能促使 mpv 重新探测
-  ///     Windows 系统的 WASAPI 音频终端。
-  ///
-  /// 两者都**完全不动播放位置**，所以误判的代价只是一次无声的 AO 重建。
   void _reloadAudioOutput() {
-    _audioStallGraceUntil = DateTime.now().add(const Duration(seconds: 4));
     final player = _videoPlayerController;
     if (player is NativePlayer) {
       try {
         final device = _mpvProp('audio-device');
-        player.setProperty(
-          'audio-device',
-          (device == null || device.isEmpty) ? 'auto' : device,
-        );
+        player
+          ..setProperty(
+            'audio-device',
+            (device == null || device.isEmpty) ? 'auto' : device,
+          )
+          ..setProperty('aid', 'no');
         _mpvCommand(const ['ao-reload']);
-        player.setProperty('aid', 'no');
       } catch (_) {}
       Future.delayed(const Duration(milliseconds: 100), () {
         if (_playerCount == 0) return;
@@ -1983,458 +1394,11 @@ class PlPlayerController with BlockConfigMixin {
             ..setProperty('aid', 'auto');
           _mpvCommand(const ['ao-reload']);
         } catch (_) {}
-        Timer(const Duration(milliseconds: 600), () {
-          if (_playerCount == 0 || isRecovering.value) return;
-          if (_hasAudioTrack()) {
-            final ao = _mpvProp('current-ao');
-            if (ao == null || ao == 'no' || ao == 'null') {
-              Utils.reportError(
-                'audio output still missing after ao-reload, escalating to reloadAtCurrentPosition',
-                null,
-              );
-              unawaited(_reloadAtCurrentPosition());
-            }
-          }
-        });
       });
     }
   }
 
-  // 启动/维持画面卡死看门狗。幂等：已有实例则复用。
-  // 仅在 Windows 且非本地文件时启用（WOA 为目标平台）。
-  void _ensureStallWatchdog() {
-    if (!Platform.isWindows || dataSource is FileSource) return;
-    _stallWatchdog ??= Timer.periodic(_stallWatchdogPeriod, (_) {
-      if (_playerCount == 0 || dataSource is FileSource) {
-        _cancelStallWatchdog();
-        return;
-      }
-      // 管线快照：纹理就绪的瞬间记一条，6s 后再记一条。
-      // 放在各种 return 之前 —— 黑屏时页面状态可能很"正常"，
-      // 而这些门一旦先 return 就什么证据都不剩了。
-      _pipelineTickDiagnostics();
 
-      // 正在跳转、页面已切走（vo=libmpv 由渲染请求驱动解码，切走后 mpv 会
-      // 停止解码）、应用没有任何可见视图时本来就不该有进展，不参与判定。
-      //
-      // ⚠️ 这里**曾经**写成 `lifecycle != AppLifecycleState.resumed` 就退出，
-      // 那是「前台播放也会卡住」的直接原因（2026-09-13 修）：
-      // Flutter 文档对 `inactive` 的定义就是「至少有一个视图可见，但都没有输入
-      // 焦点」，并明确写了 **On non-web desktop platforms, this corresponds to an
-      // application that is not in the foreground, but still has visible windows**
-      // （见 sky_engine/lib/ui/platform_dispatcher.dart 的 AppLifecycleState 文档）。
-      // 也就是说：只要用户没有把焦点留在播放器窗口上（点了别的窗口、点了任务栏、
-      // 打开了托盘右键菜单……），生命周期就是 inactive，看门狗**每个 tick 都直接
-      // 返回并清零进度**，于是画面真的卡住时没有任何自愈动作。而窗口最小化/隐藏时
-      // 播放本来就已经被 _pauseOnEnterBackground 暂停，看门狗自己要的 playing 条件
-      // 就不成立，不需要再用生命周期去挡。
-      //
-      // 所以现在只排除「一个可见视图都没有」（hidden/paused/detached）这一种情况。
-      final lifecycle = WidgetsBinding.instance.lifecycleState;
-      final noVisibleView =
-          lifecycle == AppLifecycleState.hidden ||
-          lifecycle == AppLifecycleState.paused ||
-          lifecycle == AppLifecycleState.detached;
-      if (isSeeking.value || !_isCurrVideoPage || noVisibleView) {
-        _resetStallWatchdogProgress();
-        return;
-      }
-      // ARM64 修改版（2026-09-17）：自愈重开（isRecovering）进行中时**只跳过判定、
-      // 不清零升级阶梯**。这是对抗验证抓到的收敛性缺陷：
-      //   - `_reloadAtCurrentPosition` 会把 isRecovering 一直置到重开结束
-      //     （open + 最多 6s 的 playing 确认），期间看门狗每 2s 跳过一次；
-      //   - 若把 isRecovering 和上面几项一起走 _resetStallWatchdogProgress()，
-      //     _stallRecoveryAttempts 会在重开失败（CDN URL 失效、6s 确认超时）时
-      //     被反复清零 → 阶梯永远卡在 1→2→重开→清零 的循环里，
-      //     升不到 3 级 refreshPlayUrl，且检测基线也被一起清掉。
-      //   所以这里单独 return，既不动阶梯、也不动检测基线；
-      //   重开结束后，下一 tick 从上次的状态继续判定。
-      if (isRecovering.value) {
-        // 自愈重开期间不做判定 —— 但**必须把检测基线一起丢掉**
-        // （2026-10-01，确认窗口 4s→12s 后补）：这里的 return 在
-        // `_stallWatchdogLastDrops = drops` 之前，基线会一直停在
-        // 重开前的值；窗口一长（最多 12s + 看门狗自身的 2s），重开结束后
-        // 第一个窗口就是拿「十几秒的丢帧增量」去和一个 2s 窗口的阈值比，
-        // 极易误判成「还在丢帧」，于是刚救回来立刻又升级一次恢复。
-        // 只清基线（下一 tick 走 last == null 分支重新起算）与投票窗口，
-        // **不动 `_stallRecoveryAttempts`** —— 阶梯该升还得升，那是上面
-        // 这段注释要保住的东西。
-        _stallWatchdogLastDrops = null;
-        _stallWindowHistory.clear();
-        return;
-      }
-      final drops = _intProp('frame-drop-count');
-      if (drops == null) {
-        // 属性读不到（播放器已释放等）→ 不做判定。
-        _resetStallWatchdogProgress();
-        return;
-      }
-      final last = _stallWatchdogLastDrops;
-      _stallWatchdogLastDrops = drops;
-      // 首次采样，或计数回退（mpv 重建了 VO）→ 重新起算。
-      if (last == null || drops < last) {
-        _resetStallWatchdogProgress();
-        return;
-      }
-      final now = DateTime.now();
-      final playing = playerStatus.isPlaying;
-      final buffering = isBuffering.value;
-      final pos = positionInMilliseconds;
-      final posFrozen =
-          _stallWatchdogLastPosMs >= 0 && pos == _stallWatchdogLastPosMs;
-      _stallWatchdogLastPosMs = pos;
-      final dropDelta = drops - last;
-
-      // 音频侧：用于判 E（画面在走、声音没了）。与下面那些视频判据共用同一次采样。
-      final audioPts = _mpvProp('audio-pts');
-      final ao = _mpvProp('current-ao');
-      final audioPosFrozen =
-          audioPts != null &&
-          _stallWatchdogLastAudioPts != null &&
-          audioPts == _stallWatchdogLastAudioPts;
-      _stallWatchdogLastAudioPts = audioPts;
-      // 音频输出去哪了。只认 mpv 明确给出的字面量：手册（input.rst）记
-      // `aid` 在「找不到该轨道」时返回字面量 `no`，`current-ao` 同族。
-      // **不把「读不到（null）」算成缺失** —— 读不到是属性不可用，属于
-      // 「没有证据」，不能当成「有问题的证据」（与 core-idle 用 `!= yes`
-      // 同一个取向：宁可漏判，不可误判）。
-      final aoMissing = ao == 'no' || ao == 'null';
-      final aid = _mpvProp('aid');
-      final audioTrackMissing = aid == 'no';
-      // 当 AAC 解码或 EDL 音轨流中途断流时，ao 仍为 wasapi、aid 仍为 1，
-      // 但 audio-pts 会变成 null（实机日志 47 次命中此形态）。
-      final audioPtsMissing =
-          audioPts == null && aid != null && aid != 'no';
-
-      // 帧率类指标：管线各段的产出速率。
-      final vfFps = double.tryParse(_mpvProp('estimated-vf-fps') ?? '');
-      final containerFps = double.tryParse(_mpvProp('container-fps') ?? '');
-      final coreIdle = _mpvProp('core-idle');
-
-      // 四种互相独立的卡死形态：
-      //   A. 在播 + VO 丢帧快速攀升（经典：声音在放、画面卡住，渲染端没交帧）
-      //   B. 在播 + time-pos 纹丝不动
-      //   C. 本该播放却没在播（打开视频根本起不来；用户主动暂停、或未开启
-      //      自动播放时不算，避免跟用户抢控制权）
-      //   D. 在播 + **输出链停摆**：mpv 自称没空闲（core-idle=no）、片源帧率正常
-      //      （container-fps ≥ 20），但滤镜链/输出在这个窗口里几乎没有产出
-      //      （estimated-vf-fps 塌到 ≤1 帧/秒）。
-      //      D 是本次新增，专门覆盖「画面停住却一次丢帧都没有」的形态 ——
-      //      帧根本没走到 VO 时 frame-drop-count 不会涨，A/B/C 全都不成立，
-      //      用户报的「最近一次卡住完全没有日志」就是这种。
-      // A/B/D 在缓冲中不判定（解复用暂时没数据是正常的）；C 不受 buffering 影响，
-      // 因为「一直缓冲着起不来」正是要治的形态。
-      final dropping = playing && !buffering && dropDelta >= _stallDropDelta;
-      // 注意 coreIdle 用的是「不是 yes」而不是「== no」：读不到（null）时
-      // 不应该反而把判据压掉；只有明确 idle 才排除。
-      final outputStalled =
-          playing &&
-          !buffering &&
-          coreIdle != 'yes' &&
-          containerFps != null &&
-          containerFps >= 20 &&
-          vfFps != null &&
-          vfFps <= 1.0;
-      final frozenPlaying = playing && !buffering && posFrozen;
-      final notPlayingStuck = !playing && !_userPaused && _autoPlay;
-
-      // E. 在播 + 画面照常推进，但**音频输出停摆**（2026-09-19 新增，用户报的
-      //    「视频画面继续播放而声音不动」）。
-      //
-      //    这是前四种形态的镜像，四条判据全都要求「画面出问题」，所以这种一次都
-      //    判不出来。判据必须**只依赖音频侧**，且不能碰 time-pos ——
-      //    time-pos 在 video-sync=audio 下由音频时钟驱动，音频一停它也就停了，
-      //    但用户看到的是「画面还在走」，所以真正能区分的是：
-      //      (a) 音频时钟自己不动了：连续两个采样窗口 audio-pts 完全相同；
-      //      (b) 更硬的证据：mpv 根本没挂上 AO（current-ao 为 null/no），
-      //          或者选中的音频轨不存在了（aid=no）。
-      //
-      //    ⚠️ 两个必须有的护栏，否则会误判：
-      //      1) `_hasAudioTrack()`：**片源本身没有音轨**（纯静音视频）时
-      //         aid 恒为 no、AO 也不会挂，条件 (b) 永远成立 —— 不加这条就会
-      //         对静音视频无限触发自愈，还会一路升级到整链重建。
-      //         只有「轨道存在却没在出声」才算异常。
-      //      2) `_audioStallGraceUntil`：起播/重开后 mpv 还没把 AO 挂上、
-      //         audio-pts 还是 null 的那几秒同样满足 (b)。给一段宽限期，
-      //         避免把「还没起来」当成「停摆了」。
-      //
-      //    也不在 buffering 里判：缓冲时音频本来就停着，那是正常的。
-      //
-      //    ⚠️ 还必须要求 `!posFrozen`（画面在推进）。两个理由：
-      //      1) 这才是用户报的形状 ——「画面继续播放而声音不动」；
-      //      2) 在 video-sync=audio 下 time-pos 由音频时钟驱动，音频真停了
-      //         time-pos 多半也停 → 那种情况应该走 frozenPlaying 那条线
-      //         （它的阶梯最后会整链重建，音频自然一起重建），不该被这里抢走，
-      //         否则会把一次「渲染链停摆」误诊成「AO 问题」而白费一级。
-      final videoStillAdvancing =
-          !posFrozen || (vfFps != null && vfFps >= 5.0);
-      final audioStalled =
-          playing &&
-          !buffering &&
-          videoStillAdvancing &&
-          !onlyPlayAudio.value &&
-          !now.isBefore(_audioStallGraceUntil) &&
-          _hasAudioTrack() &&
-          (aoMissing ||
-              audioTrackMissing ||
-              audioPtsMissing ||
-              audioPosFrozen);
-
-      // 证据优先：还没到判定阈值、或判据没覆盖到，只要指标有异常迹象，
-      // 也按 20s 节流记一条快照。用户感知到的卡死必须在日志里留下痕迹。
-      if (playing &&
-          !buffering &&
-          (dropDelta > 0 || outputStalled || audioStalled) &&
-          now.difference(_lastPipelineSuspicionAt) >
-              _pipelineSuspicionCooldown) {
-        _lastPipelineSuspicionAt = now;
-        _logPipelineSnapshot('suspect');
-      }
-
-      // 注：这里**没有**再按 `avsync` 判定卡死，只把它记进诊断日志。
-      //
-      // 曾经想加一条「|avsync| 持续偏大 ⇒ A/V 失步 ⇒ 需要跳转重新对齐」的判据，
-      // 因为它看起来比数丢帧更直接。但它没有通过可信度检查，故未采纳：
-      //   1) mpv 手册记 `avsync` 在不可用时为 **-1**，而 -1 的绝对值恰好落在
-      //      判定区间内 —— 起播初期/状态未就绪时会**误判成卡死**并触发多余的跳转；
-      //   2) 更要命的是语义：`avsync` 是「最后一次音视频同步差值」，由视频帧交给
-      //      VO 的那一刻算出。渲染端真停摆时不会再有帧交出去，这个值很可能**冻在
-      //      最后一次的结果上**，而不是持续漂大 —— 那就又犯了本项目已经踩过的坑
-      //      （见 ② 的注释：用 time-pos / video-pts 判断画面冻结都失败，因为它们
-      //      由音频时钟或消费端驱动，画面停了它们照旧/不更新）；
-      //   3) 误判的代价是可见的：无故往回跳。
-      // 所以 `avsync` 只进日志，不参与判定（见 _logPipelineSnapshot / stall 日志）。
-      final bad =
-          dropping ||
-          outputStalled ||
-          frozenPlaying ||
-          notPlayingStuck ||
-          audioStalled;
-      _stallWindowHistory.add(bad);
-      while (_stallWindowHistory.length > _stallWindowHistorySize) {
-        _stallWindowHistory.removeAt(0);
-      }
-      final badCount = _stallWindowHistory.where((e) => e).length;
-
-      if (badCount == 0) {
-        // 最近 _stallWindowHistorySize 个窗口全都干净 → 认为已经恢复。
-        _videoStalled = false;
-        // 但不是马上把恢复阶梯清回第 1 级：刚恢复过又卡说明「往回跳」救不了，
-        // 应当让阶梯继续往上升级。只有安静了 _stallEpisodeResetAfter 才复位。
-        if (now.difference(_lastStallRecoverAt) > _stallEpisodeResetAfter) {
-          _stallRecoveryAttempts = 0;
-        }
-      }
-      if (badCount >= _stallWindowThreshold) {
-        // 判定画面卡死（或根本没起播）。之后每个窗口都会走到这里，
-        // 真正的恢复动作由 _onVideoStalled 内的冷却节流。
-        if (!_videoStalled) {
-          _videoStalled = true;
-          _stallEpisodeDrops = drops;
-        }
-        _onVideoStalled(
-          drops,
-          // D（输出链停摆）同样靠「跳转重新对齐」恢复，归到 dropping 一档。
-          // E（音频停摆）走自己的分支（见 _onVideoStalled）。
-          kind: notPlayingStuck
-              ? _StallKind.notPlaying
-              : audioStalled
-              ? _StallKind.audioStalled
-              : (dropping || outputStalled)
-              ? _StallKind.dropping
-              : _StallKind.frozen,
-        );
-      }
-    });
-  }
-
-  // 每个采样窗口调用一次：管线快照的打点，以及主动校正视频输出尺寸。
-  void _pipelineTickDiagnostics() {
-    if (_videoController?.id.value != null) {
-      if (!_loggedPipelineReady) {
-        _loggedPipelineReady = true;
-        _pipelineReadyTicks = 0;
-        _logPipelineSnapshot('ready');
-      } else if (_pipelineReadyTicks >= 0 && ++_pipelineReadyTicks >= 3) {
-        _pipelineReadyTicks = -1;
-        _logPipelineSnapshot('t+6s');
-      }
-    } else if (_loggedPipelineReady) {
-      // 纹理 id 又变回 null（渲染端重建/掉线）→ 值得记一条。
-      _loggedPipelineReady = false;
-      _pipelineReadyTicks = -1;
-      _logPipelineSnapshot('texture-lost');
-    }
-
-    // 主动把视频输出尺寸校正成 mpv 报的显示尺寸。
-    // 竖屏视频靠这一步才能出现画面（详见 _applyVideoOutputSize 的注释）；
-    // 一旦 dw/dh 变化（换分辨率/切片源）会再下发一次。
-    _applyVideoOutputSize();
-
-    // 固定时间线：在播时每 30s 无条件记一条，供事后比对卡死前后的状态。
-    if (playerStatus.isPlaying &&
-        DateTime.now().difference(_lastTimelineAt) > _pipelineTimelinePeriod) {
-      _lastTimelineAt = DateTime.now();
-      _logPipelineSnapshot('tick');
-    }
-
-    // 「后台播放」开着 + 窗口被隐藏/最小化：播放仍在继续，但下面各种判定会
-    // 因为「一个可见视图都没有」而停止 —— 这种组合下丢帧会静默累积，
-    // 等用户还原窗口时看到的就已经是卡死的画面，而日志里什么都没有
-    // （用户反馈的「开启后台播放时仍然卡死、且日志里没有记录」正是这个形状）。
-    // 这里至少按 20s 节流留一条证据，把这条路径从"不可观测"变成"可观测"。
-    final lc = WidgetsBinding.instance.lifecycleState;
-    final noVisibleView =
-        lc == AppLifecycleState.hidden ||
-        lc == AppLifecycleState.paused ||
-        lc == AppLifecycleState.detached;
-    if (noVisibleView &&
-        playerStatus.isPlaying &&
-        !isBuffering.value &&
-        DateTime.now().difference(_lastPipelineSuspicionAt) >
-            _pipelineSuspicionCooldown) {
-      _lastPipelineSuspicionAt = DateTime.now();
-      _logPipelineSnapshot('hidden-playing');
-    }
-  }
-
-  void _resetStallWatchdogProgress() {
-    _stallWindowHistory.clear();
-    _stallWatchdogLastDrops = null;
-    _stallWatchdogLastPosMs = -1;
-    _stallWatchdogLastAudioPts = null;
-    _stallEpisodeDrops = null;
-    _videoStalled = false;
-    _stallRecoveryAttempts = 0;
-  }
-
-  void _cancelStallWatchdog() {
-    _stallWatchdog?.cancel();
-    _stallWatchdog = null;
-    _resetStallWatchdogProgress();
-  }
-
-  // 画面卡死 / 根本没起播：按「代价从低到高」逐级恢复，每次动作都记一条诊断。
-  //   dropping（丢帧型，旧症状：声音在放、画面卡住）
-  //     1 级：往回跳 1s —— 把视频 pts 重新对齐到音频，终止丢帧雪崩。
-  //           这正是用户手动「往回拖进度条」所做的事，不需要网络、代价最低。
-  //   frozen（停滞型，在播但位置不动）
-  //     1 级：再显式 play() 一次，很多情况下只是播放在某处被暂停了。
-  //   notPlaying（本该播放却没在播，新症状：打开视频根本起不来）
-  //     1 级：同上，先把播放状态拉起来（位置本来就没动，跳转没有意义）。
-  //   audioStalled（画面在走、声音没了，2026-09-19 新增）
-  //     1 级：重建音频输出（_reloadAudioOutput）—— 不动播放位置，
-  //           这一档的病根在 AO/音频解码器，跳转与重开都治不到。
-  // 之后各级相同：
-  //   2 级：重开当前 URL 从当前位置续播（refreshPlayer，不重新拉链接）。
-  //   3 级起：让视频页重新拉取播放链接（refreshPlayUrl，最重、依赖网络）。
-  // 每一级由 _lastStallRecoverAt + _stallCooldown（自己的、与网络重连分开）节流；
-  // 画面恢复正常（某窗口既没丢帧、也没落后音频、位置也在推进、或在正常播放）后
-  // _stallRecoveryAttempts 归零。
-  void _onVideoStalled(int drops, {required _StallKind kind}) {
-    final now = DateTime.now();
-    // 用自己的冷却，不共用网络重连的 _lastReconnectAt / _reconnectCooldown。
-    // 冷却按倍速缩短（见 _stallCooldownNow）：3 倍速下 6s 的等待相当于
-    // 用户眼里的 18s 视频时间，太慢。
-    if (now.difference(_lastStallRecoverAt) < _stallCooldownNow) return;
-    _lastStallRecoverAt = now;
-    _stallRecoveryAttempts++;
-
-    final start = _stallEpisodeDrops ?? drops;
-    // 诊断：把 mpv 侧关键状态一次性记下。已知的稳定特征见字段块注释
-    // （decoder-drop=0、vo-delayed=0、hwdec 正常 → 是渲染端没交帧）。
-    Utils.reportError(
-      'video stalled (recovery#$_stallRecoveryAttempts, '
-      '${kind.name}, VO dropped ${drops - start} frames): '
-      'time-pos=${positionInMilliseconds ~/ 1000}s '
-      'hwdec=${_mpvProp('hwdec-current')} vo=${_mpvProp('current-vo')} '
-      // avsync = mpv 的「最后一次音视频同步差值」（秒）。这里只记不判：画面冻结
-      // 而声音继续时它**可能**是一个越来越大的负值，也可能是冻住不动的旧值
-      // （渲染端停摆后不再有帧交给 VO，值就不再更新），而且 mpv 手册记它在不可用
-      // 时为 -1 —— 用它做判据会误判，所以先收集实机数据再定。
-      'avsync=${_mpvProp('avsync')} '
-      // 实际生效的 video-sync 与刷新率信息：用来回答「display-* 到底有没有生效」。
-      'video-sync=${_mpvProp('video-sync')} '
-      'display-fps=${_mpvProp('display-fps')} '
-      'estimated-display-fps=${_mpvProp('estimated-display-fps')} '
-      'decoder-drop=${_mpvProp('decoder-frame-drop-count')} '
-      'vo-drop=$drops '
-      'vo-delayed=${_mpvProp('vo-delayed-frame-count')} '
-      'mistimed=${_mpvProp('mistimed-frame-count')} '
-      'vsync-ratio=${_mpvProp('vsync-ratio')} '
-      'vf-fps=${_mpvProp('estimated-vf-fps')} '
-      'container-fps=${_mpvProp('container-fps')} '
-      'core-idle=${_mpvProp('core-idle')} '
-      'paused-for-cache=${_mpvProp('paused-for-cache')} '
-      'demuxer-cache-time=${_mpvProp('demuxer-cache-time')} '
-      'cache-buffering=${_mpvProp('cache-buffering-state')} '
-      'texture-id=${_videoController?.id.value} '
-      'rect=${_videoController?.rect.value} '
-      // 尺寸/旋转：竖屏视频相关的关键证据（见 _logPipelineSnapshot 的注释）
-      'dw=${_mpvProp('video-out-params/dw')} dh=${_mpvProp('video-out-params/dh')} '
-      'rotate=${_mpvProp('video-out-params/rotate')} '
-      'isVertical=$_isVertical videoFit=${videoFit.value.name} '
-      // lifecycle 用来区分「窗口可见但没焦点（inactive）」和「真的不可见
-      // （hidden/paused）」——前台卡死这条线里它是关键判据。
-      'lifecycle=${WidgetsBinding.instance.lifecycleState?.name} '
-      'state=${playerStatus.value} buffering=${isBuffering.value} '
-      'duration=${duration.value}s userPaused=$_userPaused autoPlay=$_autoPlay '
-      'callBackNull=${_playCallBack == null} '
-      // mpv 侧直接读的暂停/空闲/片尾状态：区分「mpv 被暂停」和「解码/渲染停摆」
-      'mpv-pause=${_mpvProp('pause')} idle=${_mpvProp('idle-active')} '
-      'eof=${_mpvProp('eof-reached')} seeking=${_mpvProp('seeking')}',
-      null,
-    );
-
-    // 顺手再记一条完整管线快照（含 audio-pts 之外的全部管线指标），
-    // 方便和上面的 stall 行对照出「哪个指标变了」。
-    _logPipelineSnapshot('stall#$_stallRecoveryAttempts');
-
-    // ⚠️ 这里**不能**置 `_reconnecting = true`（曾经这么做）。
-    // `_reconnecting` 只由 _scheduleReconnect 检查、由 stream.playing 在收到
-    // playing==true **状态变化**时清除；而画面卡死时音频照常播放、playing 状态
-    // 压根没变过，于是没有任何事件来清除它 —— 一次卡死恢复之后
-    // _scheduleReconnect() 会**永久**变成空操作，后面的断流再也没人重连。
-    // 卡死恢复与断流重连是两条独立通道，各自的并发保护要分开。
-    if (_stallRecoveryAttempts <= 1) {
-      if (kind == _StallKind.dropping) {
-        // 丢帧型 / 输出停摆型 1 级：往回跳，把视频 pts 重新对齐到音频，
-        // 终止「帧持续迟到被丢」的雪崩。这正是用户手动「往回拖进度条」做的事，
-        // 不需要网络、代价最低。
-        //
-        // 回退量按倍速放大（2s × speed，上限 8s）：
-        //   - 1 倍速时 2s 的缓冲，在 2 倍速下只相当于 1s、3 倍速下相当于 0.67s，
-        //     实测不足以脱离「帧持续迟到」的区间（用户反馈倍速时更容易卡）。
-        //   - 上限 8s：再大就不是「对齐」而是明显倒退进度了。
-        final rawBackOff = (2000 * _speedFactor).round();
-        final backOffMs = rawBackOff < 2000
-            ? 2000
-            : (rawBackOff > 8000 ? 8000 : rawBackOff);
-        final ms = positionInMilliseconds - backOffMs;
-        seekTo(Duration(milliseconds: ms < 0 ? 0 : ms), isSeek: false);
-      } else if (kind == _StallKind.audioStalled) {
-        // 音频停摆型 1 级：重建音频输出。病根在 AO / 音频解码器，
-        // 跳转（dropping 的做法）与显式 play（frozen/notPlaying 的做法）都治不到，
-        // 而重建 AO 完全不动播放位置，误判代价最低。
-        _reloadAudioOutput();
-      } else {
-        // 停滞型 / 起不来型 1 级：位置本来就没动，跳转没有意义 →
-        // 先把播放跑起来（走 _startPlayback，回调缺失时也能兜底）。
-        _startPlayback();
-      }
-      return;
-    }
-    if (_stallRecoveryAttempts == 2) {
-      // 2 级：上一步没救回来 → 重开当前 URL 从当前位置续播。
-      // 用 _reloadAtCurrentPosition 而不是 refreshPlayer：它把「重开 → 显式恢复
-      // 播放 → 等 playing 确认 → 清缓冲」这条链闭合，内部还会置 isRecovering
-      // 点亮自愈加载指示（见该方法的注释）。
-      unawaited(_reloadAtCurrentPosition());
-      return;
-    }
-    // 3 级起：重新拉取播放链接（CDN URL 可能已失效）。
-    PlPlayerController.refreshPlayUrl();
-  }
 
   Future<void> _tryReconnect() async {
     if (_playerCount == 0) {
@@ -2448,11 +1412,7 @@ class PlPlayerController with BlockConfigMixin {
     // 自愈重开正在进行：它自己会把播放拉起来，这里再插一次 open 只会互相
     // 打断（确认窗口 4s→12s 后这段重合时间明显变长，更容易撞上）。
     // 让出这一次并清旗标，之后仍可再重连。
-    if (isRecovering.value) {
-      _reconnecting = false;
-      return;
-    }
-    if (playerStatus.isPlaying && !isBuffering.value && !_videoStalled) {
+    if (playerStatus.isPlaying && !isBuffering.value) {
       _reconnecting = false;
       return;
     }
@@ -2514,7 +1474,6 @@ class PlPlayerController with BlockConfigMixin {
   //
   // 所以这里优先用回调（它会顺带补注册监听器），回调缺失时直接操作播放器兜底。
   Future<void> _startPlayback() async {
-    _userPaused = false;
     if (_playCallBack == null) {
       await play();
     } else {
@@ -2572,7 +1531,6 @@ class PlPlayerController with BlockConfigMixin {
           _reconnecting = false;
           _reconnectAttempts = 0;
           _lastReconnectAt = DateTime.fromMillisecondsSinceEpoch(0);
-          _resetStallWatchdogProgress();
           if (_isAutoEnterPip) {
             if (_isCurrVideoPage) {
               enterPip(autoEnter: true);
@@ -2581,7 +1539,6 @@ class PlPlayerController with BlockConfigMixin {
             }
           }
           playerStatus.value = .playing;
-          _ensureStallWatchdog();
         } else {
           _startWakeLockTimer();
           _disableAutoEnterPip();
@@ -2803,8 +1760,6 @@ class PlPlayerController with BlockConfigMixin {
   /// 播放视频
   Future<void> play({bool repeat = false, bool hideControls = true}) async {
     if (_playerCount == 0) return;
-    // 这是「想要播放」的意图，看门狗据此不再把当前状态当成卡死。
-    _userPaused = false;
     // 播放时自动隐藏控制条
     controls = !hideControls;
     // repeat为true，将从头播放
@@ -2823,9 +1778,6 @@ class PlPlayerController with BlockConfigMixin {
 
   /// 暂停播放
   Future<void> pause({bool notify = true, bool isInterrupt = false}) async {
-    // 记录「主动暂停」意图：看门狗据此不会把暂停状态当成卡死，
-    // 避免自动恢复把用户按下的暂停又按回去。
-    _userPaused = true;
     await _videoPlayerController?.pause();
     playerStatus.value = PlayerStatus.paused;
 
@@ -2860,17 +1812,9 @@ class PlPlayerController with BlockConfigMixin {
     _updatePlaybackState();
     // ARM64 修改版（2026-09-17）：记下「用户刚拖过进度条」的时刻。
     // 拖动松手后播放器要重新缓冲、位置也要重新对齐，这段时间画面本来就可能不动；
-    // 冻结恢复如果这时插进来，就会和用户自己的拖动打架（自愈重开会把用户拖到的
-    // 位置冲掉），加载指示也会叠在一起。给一个宽限期（见 _userSeekGrace）。
-    _lastUserSeekAt = DateTime.now();
     hideTaskControls();
   }
 
-  /// 用户最近一次拖动进度条的时刻。
-  DateTime _lastUserSeekAt = DateTime.fromMillisecondsSinceEpoch(0);
-  // 拖动松手后的宽限期：这段时间内不做画面冻结恢复。
-  // 8s 是「跳转 + 重新缓冲 + 音频重新对齐」在慢 CDN 下也需要的时间量级。
-  static const Duration _userSeekGrace = Duration(seconds: 8);
 
   final RxBool volumeIndicator = false.obs;
   Timer? volumeTimer;
@@ -3309,7 +2253,6 @@ class PlPlayerController with BlockConfigMixin {
     resetScreenRotation();
     cancelLongPressTimer();
     _cancelSubForSeek();
-    _reloadWatchdog?.cancel();
     if (!_isCloseAll && _playerCount > 1) {
       _playerCount -= 1;
       _heartDuration = 0;
@@ -3336,11 +2279,9 @@ class PlPlayerController with BlockConfigMixin {
     _displayBoxDebounce?.cancel();
     _displayBoxDebounce = null;
     _stopWakeLockTimer();
-    _cancelStallWatchdog();
     // 自愈重开收尾定时器与进行中旗标一并清掉（对抗验证补充）：
     // dispose 本身不等待 _reloadAtCurrentPosition 的 finally，若恰好在这里
     // 被 dispose（_playerCount 归零），别让 isRecovering 残留。
-    _reloadWatchdog?.cancel();
     isRecovering.value = false;
     // _position.close();
     // _playerEventSubs?.cancel();
@@ -3523,22 +2464,3 @@ class PlPlayerController with BlockConfigMixin {
   }
 }
 
-/// 画面卡死 / 起不来的形态（供看门狗判定与诊断日志使用）。
-enum _StallKind {
-  /// 正在播放，但 VO 持续丢帧（声音在放、画面冻结）。
-  dropping,
-
-  /// 正在播放，但播放位置不再推进。
-  frozen,
-
-  /// 本该播放却没有在播（打开视频后一直起不来）。
-  notPlaying,
-
-  /// 正在播放、画面照常推进，但**音频输出停摆**（声音没了）。
-  ///
-  /// 2026-09-19 新增。这是上面三种形态的镜像：整个看门狗原本都是围绕
-  /// 「画面冻结、声音继续」建的，四条判据（dropping / outputStalled /
-  /// frozenPlaying / notPlayingStuck）**全部要求画面出问题**，所以
-  /// 「画面在走、声音没了」一次都判不出来，也就完全没有自愈 —— 用户报的正是这个。
-  audioStalled,
-}

@@ -71,7 +71,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart'
-    show RenderProxyBox, RenderRepaintBoundary, SemanticsConfiguration;
+    show RenderProxyBox, SemanticsConfiguration;
 import 'package:flutter/services.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -326,8 +326,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
     _transformationController = TransformationController();
 
-    _startPictureFreezeSampler();
-
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 100),
@@ -555,7 +553,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     _scaleGestureRecognizer.dispose();
     _brightnessListener?.cancel();
     _controlsListener?.cancel();
-    _freezeSampler?.cancel();
     _animationController.dispose();
     _transformationController.dispose();
     _removeDmAction();
@@ -2320,139 +2317,6 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       );
     }
     return child;
-  }
-
-  // ── 画面冻结检测（像素采样，ARM64 修改版 2026-09-14）────────────────────
-  //
-  // 为什么需要它：实测那种「视频放到一半画面卡死」在 **mpv 侧完全没有信号** ——
-  // frame-drop-count 不涨、estimated-vf-fps 照常等于 container-fps、decoder-drop=0
-  // （构建 5349 的日志里 suspect / hidden-playing / texture-lost 一条都没有，
-  //  等于 mpv 一直在正常解码、帧也一直被正常消费）。既然生产端正常、而屏幕上的
-  // 画面不动，断裂点就只能在「ANGLE 表面 → Flutter 纹理 → 合成」这一段；
-  // 而对这一段，应用层唯一能观测到的信号就是**画面像素本身**。
-  //
-  // 做法：按 _freezeSamplePeriod（现为 1s）把视频那一层 RepaintBoundary 以极低
-  // 分辨率抓成一张小图（pixelRatio _freezeSampleScale = 0.05，只有几百字节），
-  // 与上一次比较；连续 _freezeSamplesToJudge（现为 3）次完全相同、且期间确实
-  // 在播、不在跳转、不在重开，就判定为「画面冻结」，交给控制器处理。
-  // 具体节拍与历史见下面那段注释；抓取分辨率极低，开销可以忽略。
-  Timer? _freezeSampler;
-  Uint8List? _lastFramePixels;
-  int _unchangedFrameSamples = 0;
-  // 采样周期与判定次数（ARM64 修改版；2026-09-18 提速一次、2026-10-01 再提速）：
-  //   - 周期 3s → 2s、判定 3 次 → 2 次；2026-10-01 周期再 2s → 1s。
-  //     **探测时长 = (判定次数 + 1) × 周期**（第一次采样只是建立基准，
-  //     `_lastFramePixels` 从 null 开始，所以要多一次比较）：
-  //     (3+1)×3s ≈ 12s → (2+1)×2s ≈ 6s → (2+1)×1s ≈ 3s，另加 0~1 个周期的
-  //     采样相位偏移。
-  //     依据是用户反馈「卡死重建的反应不够快、回调的时间不够长」：前者靠这里
-  //     （更早发现）与 onPictureFrozen 的冷却缩短一起解决，后者靠
-  //     PlPlayerController._reloadConfirmTimeout 加长。
-  //   - 恢复动作本身是「不动播放位置」的重建（第 1 级）或带着回退的重开，
-  //     误判的代价只是白做一次，所以值得更早出手。
-  //   - 判定后不清零计数（见 _samplePicture 里的说明），画面仍冻则每个采样周期
-  //     （1s）再报一次，由 PlPlayerController.onPictureFrozen 的冷却与升级阶梯节流。
-  //   - 2026-10-23 判定 2 次 → 3 次（周期保持 1s）：用户反馈「重建时间间隔太短、
-  //     老是误杀」。定帧/黑场/字幕卡/静态 UGC 图这类**合法静止**每个周期都
-  //     「完全相同」，加一次判定 = 少一次无谓的拆建；探测时长
-  //     (3+1)×1s ≈ 4s（另加 0~1 个周期的相位偏移）。配合 controller.dart 的
-  //     _pictureResyncCooldown 3s→5s，1x 下一次冻结走到整链重开约 9s（原 ~6s）。
-  static const Duration _freezeSamplePeriod = Duration(seconds: 1);
-  static const int _freezeSamplesToJudge = 3;
-  static const double _freezeSampleScale = 0.05;
-
-  void _startPictureFreezeSampler() {
-    // 只在桌面端跑：这是 WOA 上 ANGLE 渲染路径特有的问题，移动端另有 PiP /
-    // 后台等形态，没必要多背一份负载。
-    if (!PlatformUtils.isDesktop) return;
-    _freezeSampler = Timer.periodic(_freezeSamplePeriod, (_) {
-      _samplePicture();
-    });
-  }
-
-  /// 采样重入保护（2026-10-01）。`Timer.periodic` 不等这个 async 函数返回，
-  /// 而采样里有两处 await（toImage / toByteData）。周期从 2s 收到 1s 之后，
-  /// 一次慢采样（GPU→CPU 回读正好撞上吃紧的渲染链）就会让两次采样叠在一起：
-  /// 两次都拿同一个 _lastFramePixels 去比，`_unchangedFrameSamples` 被多算，
-  /// 判定提前触发 —— 而这一档恰恰要求它准。
-  bool _sampling = false;
-
-  Future<void> _samplePicture() async {
-    if (_sampling) return;
-    _sampling = true;
-    try {
-      await _samplePictureOnce();
-    } finally {
-      _sampling = false;
-    }
-  }
-
-  Future<void> _samplePictureOnce() async {
-    if (!mounted) return;
-    // 只在「画面本来就应该在动」的时候判定。
-    // 缓冲时必须跳过：实机日志里有一次触发就是 buffering=true / vf-fps=null
-    // （缓存空了、mpv 根本没在出帧），那种情况画面当然不动，但真正该做的是
-    // 等缓冲/走既有的断流重连，而不是去动播放位置。
-    //
-    // 也没有可见视图时必须跳过（ARM64 修改版 2026-10-14，后台播放卡顿的一部分）：
-    // 窗口被隐藏/最小化时合成器不再更新，toImage 拿到的永远是同一张旧图 →
-    // 像素必然「不变」，于是每 1s 误报一次冻结、按阶梯升级成真·重开（重开要
-    // 拆建 AO + 解码器 + ANGLE 表面），后台播放就这么被反复自愈空转拖卡。
-    // 判据与看门狗里的 `noVisibleView` 完全一致 —— **只排除 hidden/paused/
-    // detached**；桌面 `inactive` 是「可见但没焦点」（PiP 就常在这态），画面
-    // 该动，绝不能一起挡掉（那是当年「前台播放也会卡住」的成因）。
-    final lifecycle = WidgetsBinding.instance.lifecycleState;
-    if (lifecycle == AppLifecycleState.hidden ||
-        lifecycle == AppLifecycleState.paused ||
-        lifecycle == AppLifecycleState.detached) {
-      _unchangedFrameSamples = 0;
-      _lastFramePixels = null;
-      return;
-    }
-    if (plPlayerController.isDesktopPip) {
-      _unchangedFrameSamples = 0;
-      _lastFramePixels = null;
-      return;
-    }
-    if (!plPlayerController.playerStatus.isPlaying ||
-        plPlayerController.isSeeking.value ||
-        plPlayerController.isBuffering.value ||
-        plPlayerController.isRecovering.value) {
-      _unchangedFrameSamples = 0;
-      _lastFramePixels = null;
-      return;
-    }
-    final renderObject = _videoKey.currentContext?.findRenderObject();
-    if (renderObject is! RenderRepaintBoundary || !renderObject.hasSize) {
-      return;
-    }
-    try {
-      final image = await renderObject.toImage(pixelRatio: _freezeSampleScale);
-      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-      image.dispose();
-      if (data == null) return;
-      final pixels = data.buffer.asUint8List();
-      final last = _lastFramePixels;
-      if (last != null &&
-          last.length == pixels.length &&
-          listEquals(last, pixels)) {
-        _unchangedFrameSamples++;
-        if (_unchangedFrameSamples >= _freezeSamplesToJudge) {
-          // 故意**不**把计数清零（ARM64 修改版，2026-09-17）：清零之后下次判定
-          // 又要重新攒够 _freezeSamplesToJudge 个采样（2 次 × 1s），这段时间用户看的
-          // 的就是一张死图 —— 恢复失败的代价被采样周期放大了一倍。
-          // 保持计数后，画面仍然没变就每个采样周期（1s）再报一次，由
-          // PlPlayerController.onPictureFrozen 自己的冷却与升级阶梯负责节流。
-          // 画面一旦真的恢复，下一个采样就与上一帧不同 → 计数自然归零。
-          plPlayerController.onPictureFrozen();
-        }
-      } else {
-        _unchangedFrameSamples = 0;
-      }
-      _lastFramePixels = pixels;
-    } catch (_) {
-      // toImage 在极端情况下会抛（图层未就绪等），忽略即可。
-    }
   }
 
   /// 片源宽高比（width / height），给 PlSimpleVideo 做兜底用。
