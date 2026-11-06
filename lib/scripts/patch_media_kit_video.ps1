@@ -316,19 +316,14 @@ $OldBindTexImage = @'
 '@
 
 $NewBindTexImage = @'
-  // PiliPlus4WOA: the GL calls below need a current context. CleanUp() no
-  // longer leaves one bound (see the EGL_BAD_ACCESS fix above), and Create()
-  // may run on the Flutter platform thread as well as on the plugin thread
-  // pool, so bind the context here and release it again afterwards. Leaving
-  // it unbound is what lets Draw() (plugin thread pool) bind it later.
-  MakeCurrent(true);
-  GLuint t;
-  glGenTextures(1, &t);
-  glBindTexture(GL_TEXTURE_2D, t);
-  eglBindTexImage(display_, surface_, EGL_BACK_BUFFER);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  MakeCurrent(false);
+  // PiliPlus4WOA: do NOT call eglBindTexImage(display_, surface_,
+  // EGL_BACK_BUFFER) here. In ANGLE, binding a Pbuffer surface to a texture via
+  // eglBindTexImage marks the surface as texture-bound, which causes every
+  // subsequent eglMakeCurrent(display_, surface_, surface_, context_) to fail
+  // with EGL_BAD_ACCESS (0x3002). mpv renders to FBO 0 of surface_, which
+  // writes directly into internal_d3d_11_texture_2D_ via
+  // EGL_D3D_TEXTURE_2D_SHARE_HANDLE_ANGLE; Read() then copies it to
+  // d3d_11_texture_2D_ with CopyResource.
 '@
 
 $OldMakeCurrent = @'
@@ -566,6 +561,43 @@ $NewSwRenderSize = @'
       };
 '@
 
+$OldHwFallback = @'
+    if (!is_hardware_acceleration_enabled) {
+      std::cout << "media_kit: VideoOutput: Using S/W rendering." << std::endl;
+'@
+
+$NewHwFallback = @'
+    if (surface_manager_ != nullptr) {
+      surface_manager_->MakeCurrent(false);
+    }
+    if (!is_hardware_acceleration_enabled) {
+      // PiliPlus4WOA: clean up surface_manager_ if H/W render context creation
+      // failed so Resize() and Render() do not run both H/W and S/W paths.
+      surface_manager_.reset(nullptr);
+      std::cout << "media_kit: VideoOutput: Using S/W rendering." << std::endl;
+'@
+
+$OldVideoSetSizeEnd = @'
+    } else {
+      height_ = std::nullopt;
+    }
+  });
+}
+'@
+
+$NewVideoSetSizeEnd = @'
+    } else {
+      height_ = std::nullopt;
+    }
+    // PiliPlus4WOA: apply size changes immediately on the worker thread so
+    // surface refresh / PiP scaling does not wait for the next mpv frame.
+    if (texture_id_) {
+      CheckAndResize();
+    }
+  });
+}
+'@
+
 $OldHWidth = @'
     if (pixel_buffer_ != nullptr && texture_id_) {
       return pixel_buffer_textures_.at(texture_id_)->width;
@@ -654,33 +686,20 @@ $OldVideoOutputDtor = @'
 # and DOES set the promise, and move mpv_render_context_free() into the awaited
 # task (outside the textures mutex) so the context is guaranteed to be released
 # before the destructor returns.
-$OldVideoOutputDtor = @'
-            std::lock_guard<std::mutex> lock(textures_mutex_);
-            texture_variants_.clear();
-            // H/W
-            textures_.clear();
-            // S/W
-            pixel_buffer_textures_.clear();
-            // Free (call destructor) |ANGLESurfaceManager| through the thread
-            // pool. This will ensure synchronized EGL or ANGLE usage & won't
-            // conflict with |Render| or |CheckAndResize| of other
-            // |VideoOutput|s.
-            surface_manager_.reset(nullptr);
-            promise.set_value();
-          });
-        });
-  }
-
-  promise.get_future().wait();
-  texture_id_ = 0;
-
-  thread_pool_ref_->Post([render_context = render_context_]() {
-    mpv_render_context_free(render_context);
-  });
-}
-'@
-
 $NewVideoOutputDtor = @'
+            // PiliPlus4WOA: free render_context_ before destroying
+            // surface_manager_ (and outside textures_mutex_ so mpv cannot
+            // deadlock against a queued task), with the GL context current.
+            if (surface_manager_ != nullptr) {
+              surface_manager_->MakeCurrent(true);
+            }
+            if (render_context_ != nullptr) {
+              mpv_render_context_free(render_context_);
+              render_context_ = nullptr;
+            }
+            if (surface_manager_ != nullptr) {
+              surface_manager_->MakeCurrent(false);
+            }
             {
               std::lock_guard<std::mutex> lock(textures_mutex_);
               texture_variants_.clear();
@@ -694,11 +713,6 @@ $NewVideoOutputDtor = @'
               // |VideoOutput|s.
               surface_manager_.reset(nullptr);
             }
-            // PiliPlus4WOA: release the render context inside this awaited task,
-            // and *after* dropping textures_mutex_ so mpv cannot deadlock against
-            // a queued Render task.
-            mpv_render_context_free(render_context_);
-            render_context_ = nullptr;
             promise.set_value();
           });
         });
@@ -708,6 +722,16 @@ $NewVideoOutputDtor = @'
     thread_pool_ref_->Post([&]() {
       std::cout << "VideoOutput::~VideoOutput (no texture): "
                 << reinterpret_cast<int64_t>(handle_) << std::endl;
+      if (surface_manager_ != nullptr) {
+        surface_manager_->MakeCurrent(true);
+      }
+      if (render_context_ != nullptr) {
+        mpv_render_context_free(render_context_);
+        render_context_ = nullptr;
+      }
+      if (surface_manager_ != nullptr) {
+        surface_manager_->MakeCurrent(false);
+      }
       {
         std::lock_guard<std::mutex> lock(textures_mutex_);
         texture_variants_.clear();
@@ -715,8 +739,6 @@ $NewVideoOutputDtor = @'
         pixel_buffer_textures_.clear();
         surface_manager_.reset(nullptr);
       }
-      mpv_render_context_free(render_context_);
-      render_context_ = nullptr;
       promise.set_value();
     });
   }
@@ -761,6 +783,8 @@ $edits = @(
     @{ file = $videoPath;  old = $OldPixelBufferBody; new = $NewPixelBufferBody;           label = "video_output.cc: pixel buffer callback guard" },
     @{ file = $videoPath;  old = $OldSwCurrentSize;  new = $NewSwCurrentSize;               label = "video_output.cc: CheckAndResize S/W guard" },
     @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
+    @{ file = $videoPath;  old = $OldHwFallback;     new = $NewHwFallback;                  label = "video_output.cc: unmake current context and reset surface_manager on S/W fallback" },
+    @{ file = $videoPath;  old = $OldVideoSetSizeEnd; new = $NewVideoSetSizeEnd;            label = "video_output.cc: CheckAndResize immediately on SetSize" },
     @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
     @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" },
     @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" },

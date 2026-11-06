@@ -22,6 +22,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // Disable Windows 11 background power throttling (EcoQoS) and timer
+  // resolution throttling so unfocused PiP / background playback is not
+  // starved on Windows on ARM64.
+  PROCESS_POWER_THROTTLING_STATE power_throttling{};
+  power_throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  power_throttling.ControlMask =
+      PROCESS_POWER_THROTTLING_EXECUTION_SPEED |
+      PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+  power_throttling.StateMask = 0;
+  ::SetProcessInformation(::GetCurrentProcess(), ProcessPowerThrottling,
+                          &power_throttling, sizeof(power_throttling));
+
   flutter::DartProject project(L"data");
 
   // https://github.com/flutter/flutter/issues/188635

@@ -227,6 +227,8 @@ class PlPlayerController with BlockConfigMixin {
       (Platform.isAndroid && AndroidHelper.isPipMode) ||
       (PlatformUtils.isDesktop && isDesktopPip);
   late bool isDesktopPip = false;
+  bool _pipTransitioning = false;
+  Timer? _displayBoxDebounce;
   Rect? _lastWindowBounds;
   // 上游 2.1.6（#2997 画中画窗口记忆）：跨进入/退出记忆 PiP 窗口的位置与尺寸，
   // 让竖屏视频退出、再进横屏视频时，PiP 窗口按新比例就地调整而不是弹回默认尺寸。
@@ -299,18 +301,24 @@ class PlPlayerController with BlockConfigMixin {
     //   有此行但窗口没恢复，问题在这个函数里。）
     Utils.reportError('pip: exitDesktopPip bounds=$bounds', null);
     isDesktopPip = false;
+    _pipTransitioning = true;
+    _displayBoxDebounce?.cancel();
     try {
-      await Future.wait([
-        if (showWindowTitleBar)
-          windowManager.setTitleBarStyle(TitleBarStyle.normal),
-        windowManager.setMinimumSize(const Size(400, 700)),
-        if (bounds != null) windowManager.setBounds(bounds),
-        setAlwaysOnTop(false),
-        windowManager.setAspectRatio(0),
-      ]);
+      if (showWindowTitleBar) {
+        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      }
+      await windowManager.setMinimumSize(const Size(400, 700));
+      await windowManager.setAspectRatio(0);
+      if (bounds != null) {
+        await windowManager.setBounds(bounds);
+      }
+      await setAlwaysOnTop(false);
       Utils.reportError('pip: exitDesktopPip done', null);
     } catch (e) {
       Utils.reportError('pip: exitDesktopPip failed: $e', null);
+    } finally {
+      _pipTransitioning = false;
+      unawaited(_applyVideoOutputSize());
     }
   }
 
@@ -319,44 +327,51 @@ class PlPlayerController with BlockConfigMixin {
 
     Utils.reportError('pip: enterDesktopPip', null);
     isDesktopPip = true;
+    _pipTransitioning = true;
+    _displayBoxDebounce?.cancel();
 
-    _lastWindowBounds = await windowManager.getBounds();
+    try {
+      _lastWindowBounds = await windowManager.getBounds();
 
-    if (showWindowTitleBar) {
-      windowManager.setTitleBarStyle(TitleBarStyle.hidden);
-    }
+      if (showWindowTitleBar) {
+        await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      }
 
-    const shortSide = 280.0;
-    const minShortSide = 160.0;
-    final Size size;
-    final Size minimumSize;
-    final state = videoPlayerController!.state;
-    int width = state.width;
-    int height = state.height;
-    if (width == 0) {
-      width = this.width ?? 16;
-    }
-    if (height == 0) {
-      height = this.height ?? 9;
-    }
-    final aspectRatio = width / height;
-    if (height > width) {
-      size = Size(shortSide, shortSide / aspectRatio);
-      minimumSize = Size(minShortSide, minShortSide / aspectRatio);
-    } else {
-      size = Size(shortSide * aspectRatio, shortSide);
-      minimumSize = Size(minShortSide * aspectRatio, minShortSide);
-    }
+      const shortSide = 280.0;
+      const minShortSide = 160.0;
+      final Size size;
+      final Size minimumSize;
+      final state = videoPlayerController!.state;
+      int width = state.width;
+      int height = state.height;
+      if (width == 0) {
+        width = this.width ?? 16;
+      }
+      if (height == 0) {
+        height = this.height ?? 9;
+      }
+      final aspectRatio = width / height;
+      if (height > width) {
+        size = Size(shortSide, shortSide / aspectRatio);
+        minimumSize = Size(minShortSide, minShortSide / aspectRatio);
+      } else {
+        size = Size(shortSide * aspectRatio, shortSide);
+        minimumSize = Size(minShortSide * aspectRatio, minShortSide);
+      }
 
-    await windowManager.setMinimumSize(minimumSize);
-    setAlwaysOnTop(true);
-    final pipBounds = _lastPipBounds;
-    if (pipBounds != null) {
-      windowManager.setBounds(_adjustPipBounds(pipBounds, size, aspectRatio));
-    } else {
-      windowManager.setSize(size);
+      await windowManager.setMinimumSize(minimumSize);
+      await setAlwaysOnTop(true);
+      final pipBounds = _lastPipBounds;
+      if (pipBounds != null) {
+        await windowManager.setBounds(_adjustPipBounds(pipBounds, size, aspectRatio));
+      } else {
+        await windowManager.setSize(size);
+      }
+      await windowManager.setAspectRatio(width / height);
+    } finally {
+      _pipTransitioning = false;
+      unawaited(_applyVideoOutputSize());
     }
-    windowManager.setAspectRatio(width / height);
   }
 
   void toggleDesktopPip() {
@@ -756,6 +771,7 @@ class PlPlayerController with BlockConfigMixin {
       _loggedPipelineReady = false;
       _pipelineReadyTicks = -1;
       _pictureFrozenDrops = null;
+      _pictureEpisodeStartDrops = null;
       _pictureFrozenCount = 0;
       _pictureSurfaceRefreshCount = 0;
       // 换了片源 → 丢掉「长按持续后退」攒下来的目标位置（见 multiBackwardStart）。
@@ -1261,6 +1277,45 @@ class PlPlayerController with BlockConfigMixin {
         message.contains('missing picture in access unit');
   }
 
+  static bool _isAudioError(String message) {
+    return message.contains('AUDCLNT_E_') ||
+        message.contains('Error initializing device') ||
+        message.contains('Could not open/initialize audio device') ||
+        message.contains('Failed to initialize audio driver') ||
+        message.contains('Error decoding audio') ||
+        message.contains('decode_band_types: Input buffer exhausted');
+  }
+
+  DateTime _lastAudioErrorRecoverAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _audioErrorRecoverCount = 0;
+
+  void _onAudioStreamError(String message) {
+    if (_playerCount == 0 || isRecovering.value || onlyPlayAudio.value) {
+      return;
+    }
+    final now = DateTime.now();
+    if (now.difference(_lastAudioErrorRecoverAt) <
+        const Duration(seconds: 4)) {
+      return;
+    }
+    if (now.difference(_lastAudioErrorRecoverAt) >
+        const Duration(seconds: 20)) {
+      _audioErrorRecoverCount = 0;
+    }
+    _lastAudioErrorRecoverAt = now;
+    _audioErrorRecoverCount++;
+    Utils.reportError(
+      'audio error recovery #$_audioErrorRecoverCount: $message',
+      null,
+    );
+    if (_audioErrorRecoverCount <= 1) {
+      _reloadAudioOutput();
+    } else {
+      _audioErrorRecoverCount = 0;
+      unawaited(_reloadAtCurrentPosition());
+    }
+  }
+
   // 是否已有一次自动重连在进行中（防止重连风暴/重复重连）
   bool _reconnecting = false;
   int _reconnectAttempts = 0;
@@ -1466,6 +1521,7 @@ class PlPlayerController with BlockConfigMixin {
   // 上一次冻结时的 vo-drop，用来判断「像素不变」到底是真冻结（在丢帧）
   // 还是视频里本来就有静止画面（不丢帧 → 绝不能动播放位置）。
   int? _pictureFrozenDrops;
+  int? _pictureEpisodeStartDrops;
 
   // Rect 在 AOT 下 toString() 会打成 "Instance of 'Rect'"，所以自己拼数值。
   static String _rectDesc(ui.Rect? r) => r == null
@@ -1528,9 +1584,19 @@ class PlPlayerController with BlockConfigMixin {
     }
     _displayBox = box;
     _displayBoxDpr = dpr;
-    // 尺寸变化后立刻校正一次（不等看门狗的 2s 周期），但**不**走 force：
-    // 常规缩放不需要「强制重建」语义，只要下发的值和上次不同即可生效。
-    unawaited(_applyVideoOutputSize());
+    if (_pipTransitioning) {
+      return;
+    }
+    if (_appliedSurfaceWidth == null || _appliedSurfaceHeight == null) {
+      unawaited(_applyVideoOutputSize());
+      return;
+    }
+    _displayBoxDebounce?.cancel();
+    _displayBoxDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (_playerCount != 0) {
+        unawaited(_applyVideoOutputSize());
+      }
+    });
   }
 
   /// 目标倍率：显示区域所需的倍率，**向上**取整到阶梯里不小于它的最小一档
@@ -1579,9 +1645,9 @@ class PlPlayerController with BlockConfigMixin {
     }
     try {
       if (force) {
-        // dart 侧 setSize 有「与上次相同就跳过」的缓存，先置空强制下发一次，
-        // 这样原生一定收到一次真实的尺寸变化并触发 Resize()。
-        final cleared = ctr.setSize();
+        final tmpW = w > 2 ? w - 2 : w + 2;
+        final tmpH = h > 2 ? h - 2 : h + 2;
+        final cleared = ctr.setSize(width: tmpW, height: tmpH);
         if (cleared != null) await cleared;
       }
       final applied = ctr.setSize(width: w, height: h);
@@ -1648,13 +1714,32 @@ class PlPlayerController with BlockConfigMixin {
       _pictureFrozenCount = 0;
       _pictureReloadCount = 0;
       _pictureSurfaceRefreshCount = 0;
+      _pictureEpisodeStartDrops = null;
     }
     _pictureFrozenCount++;
 
     final drops = _intProp('frame-drop-count') ?? 0;
+    if (_pictureFrozenCount == 1) {
+      _pictureEpisodeStartDrops = _stallWatchdogLastDrops ?? drops;
+    }
     final prevDrops = _pictureFrozenDrops;
     final dropsGrowing = prevDrops != null && drops > prevDrops;
     _pictureFrozenDrops = drops;
+
+    final episodeDropsGrew =
+        _pictureEpisodeStartDrops != null && drops > _pictureEpisodeStartDrops!;
+    final vfFps = double.tryParse(_mpvProp('estimated-vf-fps') ?? '');
+    final containerFps = double.tryParse(_mpvProp('container-fps') ?? '');
+    final vfCollapsed =
+        containerFps != null &&
+        containerFps >= 15 &&
+        vfFps != null &&
+        vfFps < containerFps * 0.5;
+    final hasFreezeEvidence =
+        dropsGrowing ||
+        episodeDropsGrew ||
+        vfCollapsed ||
+        (isDesktopPip && _pictureFrozenCount >= 3);
 
     // 整链重建的门槛：倍速播放时前移。
     // 2026-09-18 再降：1x 也从 3 降到 2 —— 第 1 次先重建表面，第 2 次就整链重建。
@@ -1668,9 +1753,11 @@ class PlPlayerController with BlockConfigMixin {
     // 用户会看到进度被冲掉、缓冲指示重来一次，而且短时间内还会再冻再杀。
     // 所以下面那条分支只做一次非破坏性的表面重建，绝不整链重开、绝不 seek。
     final escalateAt = _speedFactor > 1.5 ? 1 : 2;
-    if (dropsGrowing && _pictureFrozenCount >= escalateAt) {
+    if (hasFreezeEvidence && _pictureFrozenCount >= escalateAt) {
       _pictureFrozenCount = 0;
       _pictureReloadCount++;
+      _pictureEpisodeStartDrops = null;
+      _pictureSurfaceRefreshCount = 0;
       // next-cooldown 必须用自增后的 reloads（对抗验证抓到的 off-by-one）：
       // 这次重开之后，下一次冻结的冷却间隔是按新计数算的。
       final nextReloads = _pictureReloadCount > 3 ? 3 : _pictureReloadCount;
@@ -1705,17 +1792,24 @@ class PlPlayerController with BlockConfigMixin {
     // 只重建一次视频输出表面与纹理 —— 不动播放位置。
     // 这条路径绕开「Resize 没发生 / 纹理内容陈旧」这一类断点，而且完全不动
     // 播放位置，所以即使误判（静态画面）也只是白白重建一次表面。
-    if (_pictureSurfaceRefreshCount > 0) {
-      // 已经重建过一次画面还是不动 → 更可能是静态画面，停止动作，只留日志。
+    if (_pictureSurfaceRefreshCount == 0) {
+      _pictureSurfaceRefreshCount++;
+      _applyVideoOutputSize(force: true);
+    } else if (_pictureSurfaceRefreshCount == 1) {
+      _pictureSurfaceRefreshCount++;
       Utils.reportError(
-        'picture frozen: surface already refreshed once, no further action '
+        'picture frozen: surface refresh did not unfreeze, attempting seek resync '
         '(vo-drop=$prevDrops->$drops time-pos=${positionInMilliseconds ~/ 1000}s)',
         null,
       );
-      return;
+      unawaited(seekTo(Duration(milliseconds: positionInMilliseconds), isSeek: false));
+    } else {
+      Utils.reportError(
+        'picture frozen: surface refreshed and resynced once, no further action '
+        '(vo-drop=$prevDrops->$drops time-pos=${positionInMilliseconds ~/ 1000}s)',
+        null,
+      );
     }
-    _pictureSurfaceRefreshCount++;
-    _applyVideoOutputSize(force: true);
   }
 
   // 记一条管线快照。tag 用于区分触发时机（见上面的说明）。
@@ -1852,6 +1946,7 @@ class PlPlayerController with BlockConfigMixin {
   ///
   /// 两者都**完全不动播放位置**，所以误判的代价只是一次无声的 AO 重建。
   void _reloadAudioOutput() {
+    _audioStallGraceUntil = DateTime.now().add(const Duration(seconds: 4));
     final device = _mpvProp('audio-device');
     _mpvCommand(const ['audio-reload']);
     final player = _videoPlayerController;
@@ -1966,6 +2061,10 @@ class PlPlayerController with BlockConfigMixin {
       final aoMissing = ao == 'no' || ao == 'null';
       final aid = _mpvProp('aid');
       final audioTrackMissing = aid == 'no';
+      // 当 AAC 解码或 EDL 音轨流中途断流时，ao 仍为 wasapi、aid 仍为 1，
+      // 但 audio-pts 会变成 null（实机日志 47 次命中此形态）。
+      final audioPtsMissing =
+          audioPts == null && aid != null && aid != 'no';
 
       // 帧率类指标：管线各段的产出速率。
       final vfFps = double.tryParse(_mpvProp('estimated-vf-fps') ?? '');
@@ -2027,14 +2126,19 @@ class PlPlayerController with BlockConfigMixin {
       //         time-pos 多半也停 → 那种情况应该走 frozenPlaying 那条线
       //         （它的阶梯最后会整链重建，音频自然一起重建），不该被这里抢走，
       //         否则会把一次「渲染链停摆」误诊成「AO 问题」而白费一级。
+      final videoStillAdvancing =
+          !posFrozen || (vfFps != null && vfFps >= 5.0);
       final audioStalled =
           playing &&
           !buffering &&
-          !posFrozen &&
+          videoStillAdvancing &&
           !onlyPlayAudio.value &&
           !now.isBefore(_audioStallGraceUntil) &&
           _hasAudioTrack() &&
-          (aoMissing || audioTrackMissing || audioPosFrozen);
+          (aoMissing ||
+              audioTrackMissing ||
+              audioPtsMissing ||
+              audioPosFrozen);
 
       // 证据优先：还没到判定阈值、或判据没覆盖到，只要指标有异常迹象，
       // 也按 20s 节流记一条快照。用户感知到的卡死必须在日志里留下痕迹。
@@ -2499,8 +2603,17 @@ class PlPlayerController with BlockConfigMixin {
       }),
       stream.log.listen(((PlayerLog log) {
         if (log.level == 'error' || log.level == 'fatal') {
+          final logMsg = '${log.prefix}: ${log.text}';
           // 网络断连类错误也走自动重连（log 通道前缀可能是 ffmpeg: tls: IO error）
-          if (_isNetworkResetError('${log.prefix}: ${log.text}')) {
+          if (_isNetworkResetError(logMsg)) {
+            _scheduleReconnect();
+            return;
+          }
+          if (_isAudioError(logMsg)) {
+            _onAudioStreamError(logMsg);
+            return;
+          }
+          if (logMsg.contains('EDL: Could not open source file')) {
             _scheduleReconnect();
             return;
           }
@@ -2555,6 +2668,8 @@ class PlPlayerController with BlockConfigMixin {
           // 播放中途网络连接被重置（WSAECONNRESET），从当前进度自动重连续播，
           // 避免播放器卡死。10 秒节流防止频繁重连风暴。
           _scheduleReconnect();
+        } else if (_isAudioError(event)) {
+          _onAudioStreamError(event);
         } else if (event.startsWith('Could not open codec')) {
           SmartDialog.showToast('无法加载解码器, $event，可能会切换至软解');
         } else if (!onlyPlayAudio.value) {
@@ -3178,6 +3293,8 @@ class PlPlayerController with BlockConfigMixin {
       AndroidHelper$ToDart.onUserLeaveHint = null;
     }
     _timer?.cancel();
+    _displayBoxDebounce?.cancel();
+    _displayBoxDebounce = null;
     _stopWakeLockTimer();
     _cancelStallWatchdog();
     // 自愈重开收尾定时器与进行中旗标一并清掉（对抗验证补充）：
