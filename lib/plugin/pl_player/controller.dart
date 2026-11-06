@@ -1928,7 +1928,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   Future<void> play({bool repeat = false, bool hideControls = true}) async {
     if (_playerCount == 0) return;
     // 播放时自动隐藏控制条
-    controls = !hideControls;
+    if (hideControls) controls = false;
     // repeat为true，将从头播放
     if (repeat) {
       // await seekTo(Duration.zero);
@@ -2097,7 +2097,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     } else if (playerStatus.isPlaying) {
       await pause();
     } else {
-      await play();
+      await play(hideControls: false);
     }
   }
 
