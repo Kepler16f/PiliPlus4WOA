@@ -788,7 +788,7 @@ $OldSwHeightBounds = @'
 $NewSwBounds = @'
     // PiliPlus4WOA: use one floating-point scale for both output axes.
     if (width <= 0 || height <= 0) return 0;
-    const double scale = std::min(1.0, std::min(
+    const double scale = std::min<double>(1.0, std::min<double>(
         static_cast<double>(SW_RENDERING_MAX_WIDTH) / width,
         static_cast<double>(SW_RENDERING_MAX_HEIGHT) / height));
 '@
