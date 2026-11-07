@@ -1518,6 +1518,34 @@ class PlPlayerController with BlockConfigMixin {
   }
 
   /// 播放事件监听
+  /// ARM64 修改版（2026-11-07）：把**当前实际生效的解码方式**写进 crash log。
+  ///
+  /// 为什么需要它：设置项里的「开启硬解 / 硬解模式」只说明*请求*了什么，
+  /// 不代表*生效*了什么 —— 例如 `d3d11va` 在软件渲染路径下会静默失败并退��
+  /// 软解，用户看到「我开了硬解但好像没生效」。mpv 的 `hwdec-current` 才是
+  /// 真实答案：为空即当前在软解，非空则是实际生效的硬解方式。
+  Timer? _decodeStateTimer;
+
+  void _reportDecodeState(NativePlayer player) {
+    _decodeStateTimer?.cancel();
+    // 刚开播时 hwdec-current 可能还没填好，稍等一下再读。
+    _decodeStateTimer = Timer(const Duration(milliseconds: 2500), () {
+      try {
+        final hwdec = player.getProperty('hwdec-current').toString().trim();
+        final codec = player.getProperty('video-codec').toString().trim();
+        final isHardware = hwdec.isNotEmpty && hwdec != 'no';
+        Utils.reportError(
+          'decode: codec=${codec.isEmpty ? '?' : codec} '
+          'hwdec-current=${hwdec.isEmpty ? '(empty = software)' : hwdec} '
+          '-> ${isHardware ? 'HARDWARE decoding' : 'SOFTWARE decoding'}',
+          null,
+        );
+      } catch (e) {
+        if (kDebugMode) debugPrint('decode state probe failed: $e');
+      }
+    });
+  }
+
   void _startListeners(NativePlayer player) {
     assert(_subscriptions == null);
     final stream = player.stream;
@@ -1573,6 +1601,7 @@ class PlPlayerController with BlockConfigMixin {
           _stopWakeLockTimer();
           _updatePlaybackState();
           WakelockPlus.enable();
+          _reportDecodeState(player);
           // ARM64 修改版：播放成功恢复，重置重连冷却/计数，允许下次断流重新计时。
           _reconnecting = false;
           _reconnectAttempts = 0;
