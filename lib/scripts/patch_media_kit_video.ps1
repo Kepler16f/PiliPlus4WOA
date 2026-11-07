@@ -794,6 +794,21 @@ $NewSwBounds = @'
 '@
 $NewSwWidthBounds = $NewSwBounds + "`n    return std::max<int64_t>(1, static_cast<int64_t>(width * scale));"
 $NewSwHeightBounds = $NewSwBounds + "`n    return std::max<int64_t>(1, static_cast<int64_t>(height * scale));"
+$OldExplicitSize = @'
+  thread_pool_ref_->Post([&, width, height]() {
+'@
+$NewExplicitSize = @'
+  thread_pool_ref_->Post([&, width, height]() mutable {
+    // Preserve the requested aspect ratio when software output caps its buffer.
+    if (pixel_buffer_ != nullptr && width.has_value() && height.has_value() &&
+        width.value() > 0 && height.value() > 0) {
+      const double scale = std::min<double>(1.0, std::min<double>(
+          static_cast<double>(SW_RENDERING_MAX_WIDTH) / width.value(),
+          static_cast<double>(SW_RENDERING_MAX_HEIGHT) / height.value()));
+      width = std::max<int64_t>(1, static_cast<int64_t>(width.value() * scale));
+      height = std::max<int64_t>(1, static_cast<int64_t>(height.value() * scale));
+    }
+'@
 $OldSwCallbackCount = @'
         flutter::PixelBufferTexture([&](auto, auto) {
           std::lock_guard<std::mutex> lock(textures_mutex_);
@@ -806,6 +821,7 @@ $NewSwCallbackCount = @'
 '@
 
 $edits = @(
+    @{ file = $videoPath; old = $OldExplicitSize; new = $NewExplicitSize; label = "video_output.cc: proportional explicit software dimensions" },
     @{ file = $videoPath; old = $OldSwWidthBounds; new = $NewSwWidthBounds; label = "video_output.cc: nonzero proportional software width" },
     @{ file = $videoPath; old = $OldSwHeightBounds; new = $NewSwHeightBounds; label = "video_output.cc: nonzero proportional software height" },
     @{ file = $videoPath; old = $OldSwCallbackCount; new = $NewSwCallbackCount; label = "video_output.cc: count software texture callbacks" },
