@@ -159,6 +159,7 @@ abstract final class ReplyGrpc {
     required int rpid,
     required Mode mode,
     required String? offset,
+    Map<Int64, ReplyInfo>? removed,
   }) async {
     final res = await GrpcReq.request(
       GrpcUrl.detailList,
@@ -173,7 +174,16 @@ abstract final class ReplyGrpc {
       ),
       DetailListReply.fromBuffer,
     );
-    return res..dataOrNull?.root.replies.removeWhere(needRemoveGrpc);
+    return res
+      ..dataOrNull?.root.replies.removeWhere(
+        removed == null
+            ? needRemoveGrpc
+            : (i) {
+                final flag = needRemoveGrpc(i);
+                if (flag) removed[i.id] = i;
+                return flag;
+              },
+      );
   }
 
   static Future<LoadingState<FoldListResp>> foldList({

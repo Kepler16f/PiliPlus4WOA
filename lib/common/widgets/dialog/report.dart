@@ -2,6 +2,7 @@ import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/radio_widget.dart';
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/utils/extension/string_ext.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
@@ -23,6 +24,8 @@ Future<void> autoWrapReportDialog(
   Map<String, Map<int, String>> options,
   OnReport onReport, {
   bool ban = true,
+  ValueGetter<int>? mid,
+  VoidCallback? onRemove,
   String? reportUrl,
   ReasonCheck withContent = _kReportCheck,
   ReasonCheck contentRequired = _kReportCheck,
@@ -140,6 +143,15 @@ Future<void> autoWrapReportDialog(
         ],
       ),
       actions: [
+        if (mid != null)
+          TextButton(
+            onPressed: () {
+              Get.back();
+              Pref.setBlackMid(mid());
+              onRemove?.call();
+            },
+            child: const Text('本地屏蔽'),
+          ),
         TextButton(
           onPressed: Get.back,
           child: Text(
