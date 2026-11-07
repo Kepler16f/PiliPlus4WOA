@@ -82,7 +82,9 @@ if (-not [string]::IsNullOrEmpty($RootOverride)) {
     # rootUri looks like: file:///C:/Users/x/AppData/Local/Pub/Cache/git/media-kit-<hash>/media_kit_video
     $uri = [System.Uri]$entry.rootUri
     $videoDir = Join-Path $uri.LocalPath "windows"
-    if (-not (Test-Path (Join-Path $videoDir "angle_surface_manager.cc"))) {
+    # video_output.cc exists in both renderer variants (ANGLE/OpenGL and
+    # D3D11/DXGI); angle_surface_manager.cc only exists in the ANGLE one.
+    if (-not (Test-Path (Join-Path $videoDir "video_output.cc"))) {
         throw "resolved media_kit_video dir has no windows sources: $videoDir"
     }
     Write-Host "media_kit_video (from package_config.json): $videoDir"
