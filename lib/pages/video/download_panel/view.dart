@@ -1,6 +1,7 @@
 import 'package:PiliPlus/common/assets.dart';
 import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/common/widgets/badge.dart';
+import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/dialog/dialog.dart';
 import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
 import 'package:PiliPlus/common/widgets/stat/stat.dart';
@@ -161,11 +162,30 @@ class _DownloadPanelState extends State<DownloadPanel> {
               ],
             ),
           ),
+          Builder(
+            builder: (context) => iconButton(
+              size: 34,
+              iconSize: 20,
+              tooltip: '缓存字幕/分段',
+              onPressed: () {
+                _downloadService.toggleCachePlayInfo();
+                (context as Element).markNeedsBuild();
+              },
+              icon: Icon(
+                _downloadService.cachePlayInfo
+                    ? Icons.subtitles_outlined
+                    : Icons.subtitles_off_outlined,
+                color: _downloadService.cachePlayInfo
+                    ? colorScheme.onSurfaceVariant
+                    : colorScheme.outline,
+              ),
+            ),
+          ),
           // ARM64 修改版：保留本项目原有的网络状态指示（移动端 + 桌面调试模式
           // 显示「当前网络：WIFI/数据」文字），上游 2.2.0 改成了图标。
           if (kDebugMode || PlatformUtils.isMobile)
             Padding(
-              padding: const .only(right: 16),
+              padding: const .only(left: 6, right: 16),
               child: StreamBuilder(
                 stream: Connectivity().onConnectivityChanged,
                 builder: (context, snapshot) {
