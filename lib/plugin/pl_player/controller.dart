@@ -1534,10 +1534,18 @@ class PlPlayerController with BlockConfigMixin {
         final hwdec = player.getProperty('hwdec-current').toString().trim();
         final codec = player.getProperty('video-codec').toString().trim();
         final isHardware = hwdec.isNotEmpty && hwdec != 'no';
+        int countOf(String name) {
+          // media_kit's getProperty() returns the raw property value as text.
+          return int.tryParse(player.getProperty(name).trim()) ?? 0;
+        }
+
         Utils.reportError(
           'decode: codec=${codec.isEmpty ? '?' : codec} '
           'hwdec-current=${hwdec.isEmpty ? '(empty = software)' : hwdec} '
-          '-> ${isHardware ? 'HARDWARE decoding' : 'SOFTWARE decoding'}',
+          '-> ${isHardware ? 'HARDWARE decoding' : 'SOFTWARE decoding'} '
+          'decoder-drops=${countOf('decoder-frame-drop-count')} '
+          'vo-drops=${countOf('vo-drop-frame-count')} '
+          'vo-delayed=${countOf('vo-delayed-frame-count')}',
           null,
         );
       } catch (e) {
