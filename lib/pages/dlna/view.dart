@@ -4,6 +4,7 @@ import 'package:PiliPlus/common/widgets/loading_widget/http_error.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/loading_widget.dart';
 import 'package:PiliPlus/common/widgets/scaffold/simple_scaffold.dart';
 import 'package:PiliPlus/common/widgets/view_sliver_safe_area.dart';
+import 'package:PiliPlus/utils/dlna_utils.dart';
 import 'package:dlna_dart/dlna.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
@@ -115,6 +116,7 @@ class _DLNAPageState extends State<DLNAPage> {
             subtitle: Text(key),
             onTap: () async {
               if (isCurr) return;
+              normalizeLegacyDlnaControlUrls(device);
               _lastDevice?.pause();
               _lastDevice = device;
               _lastDeviceKey = key;
