@@ -194,37 +194,37 @@ dependency_overrides:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: media_kit
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_libs_android_video:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: libs/android/media_kit_libs_android_video
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_libs_ios_video:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: libs/ios/media_kit_libs_ios_video
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_libs_video:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: libs/universal/media_kit_libs_video
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_libs_windows_video:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: libs/windows/media_kit_libs_windows_video
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_native_event_loop:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: media_kit_native_event_loop
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   media_kit_video:
     git:
       url: https://github.com/Kepler16f/media-kit.git
       path: media_kit_video
-      ref: version_1.2.5
+      ref: version_1.2.5-dxgi
   cached_network_image_ce:
     git:
       url: https://github.com/My-Responsitories/flutter_cached_network_image_ce.git
