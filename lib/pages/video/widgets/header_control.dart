@@ -822,7 +822,11 @@ class HeaderControlState extends State<HeaderControl>
     BuildContext context, {
     required NativePlayer player,
   }) {
-    final hwdec = player.getProperty('hwdec-current');
+    // hwdec-current 为空即当前实际在软解；非空则是实际生效的硬解方式。
+    // 直接显示原始字符串容易被误读成「硬解已启用」，所以这里明确标注。
+    final rawHwdec = player.getProperty('hwdec-current').toString().trim();
+    final isHardwareDecoding = rawHwdec.isNotEmpty && rawHwdec != 'no';
+    final hwdec = isHardwareDecoding ? '硬解（$rawHwdec）' : '软解';
     final volume = player.getProperty('volume');
     showDialog(
       context: context,
@@ -2039,7 +2043,8 @@ class HeaderControlState extends State<HeaderControl>
                       semanticsLabel: '投币',
                     ),
                   ),
-                ),                SizedBox(
+                ),
+                SizedBox(
                   width: btnWidth,
                   height: btnHeight,
                   child: ActionItem(

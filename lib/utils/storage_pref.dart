@@ -229,7 +229,14 @@ abstract final class Pref {
 
   static int get defaultVideoQa => _setting.get(
     SettingBoxKey.defaultVideoQa,
-    defaultValue: VideoQuality.super8k.code,
+    // ARM64 修改版（2026-11-07）：Windows on ARM 上的 libmpv **没有 OpenGL**
+    // （gpu-context 只接受 winvk/d3d11/auto），mpv 的客户端渲染 API 只能走
+    // CPU 软件渲染；同时硬件解码只有 d3d11va-copy（每帧一次 GPU→CPU 回读）。
+    // 这种组合下 4K/8K 流必然「画面卡死、声音继续」，所以桌面端默认只请求
+    // 1080p（与移动端默认一致）。用户仍可在「设置 → 播放」里改成更高画质。
+    defaultValue: Platform.isWindows
+        ? VideoQuality.high1080.code
+        : VideoQuality.super8k.code,
   );
 
   static int get defaultVideoQaCellular => _setting.get(
@@ -251,6 +258,14 @@ abstract final class Pref {
     final codecs = _setting.get(SettingBoxKey.preferCodecs);
     if (codecs is List) {
       return codecs.map((i) => VideoDecodeFormatType.values.byName(i)).toList();
+    }
+    // ARM64 修改版（2026-11-07）：Windows on ARM 上 AV1 没有可用的硬解
+    // （d3d11 / dxva2_vld 全部初始化失败），只能走 dav1d 软解；1080p60 的
+    // AV1 软解在 ARM64 上跟不上解码速度，症状正是「画面卡住、声音继续」。
+    // 所以默认不索取 AV1，优先 AVC / HEVC（这两者在本机有 d3d11va 硬解）。
+    // 用户仍可在「设置 → 视频」里改回来。
+    if (Platform.isWindows) {
+      return const <VideoDecodeFormatType>[.AVC, .HEVC];
     }
     return const <VideoDecodeFormatType>[.AVC, .AV1];
   }

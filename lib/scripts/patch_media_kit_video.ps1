@@ -64,7 +64,7 @@ function Save-Normalized($path, $state) {
 $videoDir = $null
 if (-not [string]::IsNullOrEmpty($RootOverride)) {
     $videoDir = Join-Path $RootOverride "windows"
-    if (-not (Test-Path (Join-Path $videoDir "angle_surface_manager.cc"))) {
+    if (-not (Test-Path (Join-Path $videoDir "video_output.cc"))) {
         throw "argument does not look like a media_kit_video package dir: $RootOverride"
     }
     Write-Host "media_kit_video (from argument): $videoDir"
@@ -94,9 +94,29 @@ $videoPath = Join-Path $videoDir "video_output.cc"
 $videoHeaderPath = Join-Path $videoDir "video_output.h"
 $utilsPath = Join-Path $videoDir "utils.cc"
 
-foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath, $utilsPath)) {
+# media_kit_video 的 Windows 渲染后端有两套，补丁内容完全不同：
+#   * ANGLE/OpenGL（旧）：存在 angle_surface_manager.*
+#   * 原生 D3D11/DXGI（新）：存在 d3d11_renderer.* / mailbox_swap_chain.*
+#
+# 2026-11-07 起本 fork 改用 DXGI：Windows on ARM（骁龙 8cx 等）没有桌面
+# OpenGL 驱动，mpv 的 MPV_RENDER_API_TYPE_OPENGL 渲染上下文根本建不起来，
+# media_kit_video 会**静默**回退到 CPU 软件渲染 —— 表现就是「画面卡死、声音
+# 继续播放」。DXGI 路径让 mpv 直接持有 D3D11 设备，d3d11va 才能零拷贝工作。
+$useAngle = Test-Path $anglePath
+$useDxgi = Test-Path (Join-Path $videoDir "d3d11_renderer.cc")
+
+foreach ($p in @($videoPath, $videoHeaderPath, $utilsPath)) {
     if (-not (Test-Path $p)) { throw "missing source file: $p" }
 }
+if ($useAngle) {
+    foreach ($p in @($headerPath, $anglePath)) {
+        if (-not (Test-Path $p)) { throw "missing source file: $p" }
+    }
+}
+if (-not $useAngle -and -not $useDxgi) {
+    throw "media_kit_video/windows has neither angle_surface_manager.cc nor d3d11_renderer.cc -- unknown renderer variant, update lib/scripts/patch_media_kit_video.ps1"
+}
+Write-Host "media_kit_video renderer variant: $(if ($useAngle) { 'ANGLE/OpenGL' } else { 'D3D11/DXGI' })"
 
 # ---- inserted code -------------------------------------------------------
 $TraceHeader = @'
@@ -820,39 +840,77 @@ $NewSwCallbackCount = @'
           g_mkTrace.video_cb++;
 '@
 
+# ---- DXGI (new) variant specific anchors ---------------------------------
+# 上游 DXGI 版 video_output.cc 的 SetSize 依旧分别 clamp 宽和高，软件输出缓冲
+# 被限幅时会把竖屏画面压成方形。这里改成两轴用同一个比例系数等比缩放。
+$OldDxgiSetSize = @'
+void VideoOutput::SetSize(std::optional<int64_t> width,
+                          std::optional<int64_t> height) {
+  thread_pool_ref_->Post([&, width, height]() {
+    if (width.has_value()) {
+'@
+$NewDxgiSetSize = @'
+void VideoOutput::SetSize(std::optional<int64_t> width,
+                          std::optional<int64_t> height) {
+  thread_pool_ref_->Post([&, width, height]() mutable {
+    // PiliPlus4WOA: keep the aspect ratio when the software buffer has to be
+    // capped -- the upstream code clamps width and height independently, which
+    // squashes portrait videos.
+    if (pixel_buffer_ != nullptr && width.has_value() && height.has_value() &&
+        width.value() > 0 && height.value() > 0) {
+      const double scale = std::min<double>(1.0, std::min<double>(
+          static_cast<double>(SW_RENDERING_MAX_WIDTH) / width.value(),
+          static_cast<double>(SW_RENDERING_MAX_HEIGHT) / height.value()));
+      width = std::max<int64_t>(1, static_cast<int64_t>(width.value() * scale));
+      height = std::max<int64_t>(1, static_cast<int64_t>(height.value() * scale));
+    }
+    if (width.has_value()) {
+'@
+
 $edits = @(
-    @{ file = $videoPath; old = $OldExplicitSize; new = $NewExplicitSize; label = "video_output.cc: proportional explicit software dimensions" },
-    @{ file = $videoPath; old = $OldSwWidthBounds; new = $NewSwWidthBounds; label = "video_output.cc: nonzero proportional software width" },
-    @{ file = $videoPath; old = $OldSwHeightBounds; new = $NewSwHeightBounds; label = "video_output.cc: nonzero proportional software height" },
-    @{ file = $videoPath; old = $OldSwCallbackCount; new = $NewSwCallbackCount; label = "video_output.cc: count software texture callbacks" },
-    @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
-    @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
-    @{ file = $anglePath;  old = $OldSetSize;        new = $NewSetSize;                     label = "angle_surface_manager.cc: SetSize under mutex" },
-    @{ file = $anglePath;  old = $OldCleanUpRelease; new = $NewCleanUpRelease;             label = "angle_surface_manager.cc: release context with EGL_NO_CONTEXT" },
-    @{ file = $anglePath;  old = $OldBindTexImage;  new = $NewBindTexImage;                label = "angle_surface_manager.cc: bind context around GL calls" },
-    @{ file = $anglePath;  old = $OldMakeCurrent;    new = $NewMakeCurrent;                 label = "angle_surface_manager.cc: MakeCurrent counter" },
-    @{ file = $anglePath;  old = $OldDraw;           new = $NewDraw;                        label = "angle_surface_manager.cc: Draw counter" },
-    @{ file = $anglePath;  old = $OldRead;           new = $NewRead;                        label = "angle_surface_manager.cc: Read counter + null guard" },
-    @{ file = $anglePath;  old = $OldCreate;         new = $NewCreate;                      label = "angle_surface_manager.cc: Create counter" },
-    @{ file = $videoPath;  old = $OldRenderHead;     new = $NewRenderHead;                  label = "video_output.cc: Render counters" },
-    @{ file = $videoPath;  old = $OldMark;           new = $NewMark;                        label = "video_output.cc: MarkTextureFrameAvailable counter" },
-    @{ file = $videoPath;  old = $OldGpuCallbackBody; new = $NewGpuCallbackBody;           label = "video_output.cc: GPU callback guard + counters" },
-    @{ file = $videoPath;  old = $OldPixelBufferBody; new = $NewPixelBufferBody;           label = "video_output.cc: pixel buffer callback guard" },
-    @{ file = $videoPath;  old = $OldSwCurrentSize;  new = $NewSwCurrentSize;               label = "video_output.cc: CheckAndResize S/W guard" },
-    @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
-    @{ file = $videoPath;  old = $OldHwFallback;     new = $NewHwFallback;                  label = "video_output.cc: unmake current context and reset surface_manager on S/W fallback" },
-    @{ file = $videoPath;  old = $OldVideoSetSizeEnd; new = $NewVideoSetSizeEnd;            label = "video_output.cc: CheckAndResize immediately on SetSize" },
-    @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
-    @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" },
-    @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" },
     @{ file = $utilsPath; old = $OldFullscreenRect; new = $NewFullscreenRect;                label = "utils.cc: EnterNativeFullscreen must use GetWindowRect (26H2 taskbar-height shift)" }
 )
+
+if ($useAngle) {
+    $edits += @(
+        @{ file = $videoPath; old = $OldExplicitSize; new = $NewExplicitSize; label = "video_output.cc: proportional explicit software dimensions" },
+        @{ file = $videoPath; old = $OldSwWidthBounds; new = $NewSwWidthBounds; label = "video_output.cc: nonzero proportional software width" },
+        @{ file = $videoPath; old = $OldSwHeightBounds; new = $NewSwHeightBounds; label = "video_output.cc: nonzero proportional software height" },
+        @{ file = $videoPath; old = $OldSwCallbackCount; new = $NewSwCallbackCount; label = "video_output.cc: count software texture callbacks" },
+        @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
+        @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
+        @{ file = $anglePath;  old = $OldSetSize;        new = $NewSetSize;                     label = "angle_surface_manager.cc: SetSize under mutex" },
+        @{ file = $anglePath;  old = $OldCleanUpRelease; new = $NewCleanUpRelease;             label = "angle_surface_manager.cc: release context with EGL_NO_CONTEXT" },
+        @{ file = $anglePath;  old = $OldBindTexImage;  new = $NewBindTexImage;                label = "angle_surface_manager.cc: bind context around GL calls" },
+        @{ file = $anglePath;  old = $OldMakeCurrent;    new = $NewMakeCurrent;                 label = "angle_surface_manager.cc: MakeCurrent counter" },
+        @{ file = $anglePath;  old = $OldDraw;           new = $NewDraw;                        label = "angle_surface_manager.cc: Draw counter" },
+        @{ file = $anglePath;  old = $OldRead;           new = $NewRead;                        label = "angle_surface_manager.cc: Read counter + null guard" },
+        @{ file = $anglePath;  old = $OldCreate;         new = $NewCreate;                      label = "angle_surface_manager.cc: Create counter" },
+        @{ file = $videoPath;  old = $OldRenderHead;     new = $NewRenderHead;                  label = "video_output.cc: Render counters" },
+        @{ file = $videoPath;  old = $OldMark;           new = $NewMark;                        label = "video_output.cc: MarkTextureFrameAvailable counter" },
+        @{ file = $videoPath;  old = $OldGpuCallbackBody; new = $NewGpuCallbackBody;           label = "video_output.cc: GPU callback guard + counters" },
+        @{ file = $videoPath;  old = $OldPixelBufferBody; new = $NewPixelBufferBody;           label = "video_output.cc: pixel buffer callback guard" },
+        @{ file = $videoPath;  old = $OldSwCurrentSize;  new = $NewSwCurrentSize;               label = "video_output.cc: CheckAndResize S/W guard" },
+        @{ file = $videoPath;  old = $OldSwRenderSize;   new = $NewSwRenderSize;                label = "video_output.cc: Render S/W guard" },
+        @{ file = $videoPath;  old = $OldHwFallback;     new = $NewHwFallback;                  label = "video_output.cc: unmake current context and reset surface_manager on S/W fallback" },
+        @{ file = $videoPath;  old = $OldVideoSetSizeEnd; new = $NewVideoSetSizeEnd;            label = "video_output.cc: CheckAndResize immediately on SetSize" },
+        @{ file = $videoHeaderPath; old = $OldHWidth;  new = $NewHWidth;                       label = "video_output.h: width() guard" },
+        @{ file = $videoHeaderPath; old = $OldHHeight; new = $NewHHeight;                      label = "video_output.h: height() guard" },
+        @{ file = $videoPath; old = $OldVideoOutputDtor; new = $NewVideoOutputDtor;              label = "video_output.cc: destructor must not hang (render context leak -> mpv abort)" }
+    )
+} else {
+    $edits += @(
+        @{ file = $videoPath; old = $OldDxgiSetSize; new = $NewDxgiSetSize; label = "video_output.cc: proportional software dimensions on explicit resize" }
+    )
+}
 
 
 
 # ---- pass 1: verify every anchor BEFORE writing anything -----------------
 $states = @{}
-foreach ($p in @($headerPath, $anglePath, $videoPath, $videoHeaderPath, $utilsPath)) {
+$filesToPatch = @($videoPath, $videoHeaderPath, $utilsPath)
+if ($useAngle) { $filesToPatch += @($headerPath, $anglePath) }
+foreach ($p in $filesToPatch) {
     $states[$p] = Get-Normalized $p
 }
 # 锚点也要统一成 LF：本脚本在 Windows 上是 CRLF，here-string 里的换行因此是 CRLF，

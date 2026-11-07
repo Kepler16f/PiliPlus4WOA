@@ -46,5 +46,14 @@ enum HwDecType {
       ? kDebugMode
             ? autoSafe.hwdec
             : [mediacodec.hwdec, autoSafe.hwdec].join(',')
+      : Platform.isWindows
+      // Windows on ARM（骁龙 8cx 等）上的 libmpv 没有编译 OpenGL，mpv 的客户端
+      // 渲染 API 只能走 CPU 软件渲染；软件渲染器只吃 CPU 帧，所以硬件解码只能
+      // 用**回拷**的 d3d11va-copy（d3d11va 的 GPU 帧它接不住）。mpv 的 hwdec 是
+      // 一条**优先级列表**：前面的初始化失败会自动试下一个 —— 实测（本地探针
+      // + 真实 H.264 流）d3d11va,d3d11va-copy,auto 最终落到 d3d11va-copy，
+      // 日志里会打印「Using hardware decoding (d3d11va-copy)」；只写 d3d11va
+      // 则会静默退回软解。
+      ? [d3d11va.hwdec, d3d11vaCopy.hwdec, auto.hwdec].join(',')
       : auto.hwdec;
 }

@@ -1521,7 +1521,52 @@ class PlPlayerController with BlockConfigMixin {
   void _startListeners(NativePlayer player) {
     assert(_subscriptions == null);
     final stream = player.stream;
+    // mpv 日志转存到 crash log 的条数上限（每个播放器实例）。
+    var mpvLogCount = 0;
     _subscriptions = [
+      /// mpv logs
+      ///
+      /// ARM64 修改版（2026-11-07）：把 mpv 的**错误**日志写进 crash log。
+      ///
+      /// 起因：Windows 上 media_kit_video 的 ANGLE 路径会因 mpv 的 OpenGL 渲染
+      /// 上下文创建失败而**静默**回退到 CPU 软件渲染（原生侧只往 stdout 打一行，
+      /// release 版看不到），症状是「画面卡死、声音继续」。有了这段日志，下次
+      /// 再退化时能直接看到 mpv 自己说的原因（例如 vo/gpu/hwdec 初始化失败），
+      /// 不用再靠猜。
+      ///
+      /// 只收 error 级、且只收与渲染/解码相关的关键词，避免把断流之类的常规
+      /// 报错刷满 crash log。
+      stream.log.listen((log) {
+        mpvLogCount++;
+        if (mpvLogCount > 40) return;
+        final text = log.text.toLowerCase();
+        final isError = log.level == 'error' || log.level == 'fatal';
+        // mpv 在 info 级别报告「Using hardware decoding (d3d11va-copy)」——
+        // 这是判断**硬解到底有没有生效**唯一可靠的信号（设置项本身不算数，
+        // d3d11va 在软件渲染路径下会静默失败）。
+        final isDecodeReport =
+            text.contains('using hardware decoding') ||
+            text.contains('using software decoding') ||
+            text.contains('decoding with');
+        if (!isError && !isDecodeReport) return;
+        const keywords = [
+          'vo:',
+          'gpu',
+          'opengl',
+          'dxgi',
+          'd3d',
+          'hwdec',
+          'render',
+          'context',
+          'decoder',
+          'vo/',
+          'hardware decoding',
+          'software decoding',
+        ];
+        if (!keywords.any(text.contains)) return;
+        Utils.reportError('mpv[${log.prefix}] ${log.text}', null);
+      }),
+
       /// playing
       stream.playing.listen((bool playing) {
         if (playing) {
