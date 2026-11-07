@@ -515,6 +515,8 @@ Future<void> _showMaxVolumeDialog(
   return showVolumeDialog(
     context,
     title: const Text('最高音量'),
+    min: 1,
+    max: 100,
     value: Pref.maxVolume * 100,
     onChanged: (rawValue) {
       final maxVolume = (rawValue / 100).toPrecision(2);
@@ -536,14 +538,16 @@ Future<void> showVolumeDialog(
   required Widget title,
   required double value,
   required ValueChanged<double> onChanged,
+  double min = kMinVolume,
+  double max = kMaxVolume,
 }) async {
   final res = await showDialog<double>(
     context: context,
     builder: (context) => SliderDialog(
       title: title,
-      min: kMinVolume,
-      max: kMaxVolume,
-      divisions: 40,
+      min: min,
+      max: max,
+      divisions: (max - min).round(),
       precise: 0,
       value: value,
       suffix: '%',

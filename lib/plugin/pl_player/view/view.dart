@@ -195,7 +195,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   final _playerKey = GlobalKey();
   final _videoKey = GlobalKey();
 
-  final RxDouble _brightnessValue = 0.0.obs;
+  final RxDouble _brightnessValue = (Platform.isWindows ? 1.0 : 0.0).obs;
+  double _gestureStartVolume = 1.0;
+  double _gestureStartBrightness = 1.0;
   final RxBool _brightnessIndicator = false.obs;
   Timer? _brightnessTimer;
 
@@ -331,6 +333,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       duration: const Duration(milliseconds: 100),
     );
     videoController = plPlayerController.videoController!;
+    if (Platform.isWindows && plPlayerController.brightness.value >= 0) {
+      _brightnessValue.value = plPlayerController.brightness.value.clamp(
+        0.0,
+        1.0,
+      );
+    }
 
     if (PlatformUtils.isMobile) {
       Future.microtask(() {
@@ -519,7 +527,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   Future<void> setBrightness(double value) async {
     _brightnessValue.value = value;
     try {
-      if (Platform.isIOS || plPlayerController.setSystemBrightness) {
+      if (Platform.isWindows) {
+        // Windows has no screen_brightness implementation. Dim only the video.
+      } else if (Platform.isIOS || plPlayerController.setSystemBrightness) {
         await ScreenBrightnessPlatform.instance.setSystemScreenBrightness(
           value,
         );
@@ -1228,6 +1238,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   void _onPanStart(ScaleStartDetails details) {
     _gestureType = null;
     _initialFocalPoint = details.localFocalPoint;
+    _gestureStartVolume = plPlayerController.volume.value;
+    _gestureStartBrightness = _brightnessValue.value;
   }
 
   void _onScaleUpdate(double scale) {
@@ -1271,33 +1283,37 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPanUpdate(ScaleUpdateDetails details) {
+    final start = _initialFocalPoint;
+    if (start == null || maxHeight <= 0) return;
     if (_gestureType == null) {
-      final cumulativeDelta = details.localFocalPoint - _initialFocalPoint!;
-      if (cumulativeDelta.distanceSquared < 1) return;
+      final cumulativeDelta = details.localFocalPoint - start;
+      if (cumulativeDelta.distanceSquared < 64) return;
       final dx = cumulativeDelta.dx.abs();
       final dy = cumulativeDelta.dy.abs();
-      if (dx > 3 * dy) {
+      if (dx > dy) {
         _onHorizontalDragStart();
         _gestureType = .horizontal;
-      } else if (dy > 3 * dx) {
+      } else {
         if (!plPlayerController.enableSlideVolumeBrightness &&
             !plPlayerController.enableSlideFS) {
           return;
         }
 
-        final double tapPosition = details.localFocalPoint.dx;
-        final double sectionWidth = maxWidth / 3;
+        final double tapPosition = start.dx;
+        final double sectionWidth =
+            maxWidth / (plPlayerController.enableSlideFS ? 3 : 2);
         if (tapPosition < sectionWidth) {
           if (!plPlayerController.enableSlideVolumeBrightness) {
             return;
           }
           // 左边区域
-          if (PlatformUtils.isDesktop) {
+          if (PlatformUtils.isDesktop && !Platform.isWindows) {
             _gestureType = .right;
           } else {
             _gestureType = .left;
           }
-        } else if (tapPosition < sectionWidth * 2) {
+        } else if (plPlayerController.enableSlideFS &&
+            tapPosition < sectionWidth * 2) {
           if (!plPlayerController.enableSlideFS) {
             return;
           }
@@ -1359,9 +1375,11 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       _onHorizontalDragUpdate(delta.dx);
     } else if (_gestureType == .left) {
       // 左边区域 👈
-      final double level = maxHeight * 3;
-      final double brightness = (_brightnessValue.value - delta.dy / level)
-          .clamp(0.0, 1.0);
+      final double level = maxHeight;
+      final double brightness =
+          (_gestureStartBrightness -
+                  (details.localFocalPoint.dy - start.dy) / level)
+              .clamp(0.0, 1.0);
       setBrightness(brightness);
     } else if (_gestureType == .center) {
       // 全屏
@@ -1389,15 +1407,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       }
     } else if (_gestureType == .right) {
       // 右边区域
-      EasyThrottle.throttle(
-        'setVolume',
-        const Duration(milliseconds: 20),
-        () => plPlayerController.setVolume(
-          clampDouble(
-            plPlayerController.volume.value - delta.dy / (maxHeight * 0.5),
-            0.0,
-            plPlayerController.maxVolume,
-          ),
+      plPlayerController.setVolume(
+        clampDouble(
+          _gestureStartVolume -
+              (details.localFocalPoint.dy - start.dy) / (maxHeight * 0.5),
+          0.0,
+          plPlayerController.maxVolume,
         ),
       );
     }
@@ -2374,10 +2389,19 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                     // SimpleVideo —— 后者在拿不到 rect / stream.size 时直接返回空
                     // 盒子（外层是黑底，于是表现为"黑屏且无任何线索"），
                     // 竖屏视频黑屏正是落在这条路径上。详见该文件头注释。
-                    child: PlSimpleVideo(
-                      controller: plPlayerController.videoController!,
-                      aspectRatio: videoFit.aspectRatio,
-                      sourceAspectRatio: _sourceAspectRatio,
+                    child: Container(
+                      foregroundDecoration: Platform.isWindows
+                          ? BoxDecoration(
+                              color: Colors.black.withValues(
+                                alpha: 1.0 - _brightnessValue.value,
+                              ),
+                            )
+                          : null,
+                      child: PlSimpleVideo(
+                        controller: plPlayerController.videoController!,
+                        aspectRatio: videoFit.aspectRatio,
+                        sourceAspectRatio: _sourceAspectRatio,
+                      ),
                     ),
                   ),
                 );

@@ -375,7 +375,9 @@ class PlPlayerController with BlockConfigMixin {
       await setAlwaysOnTop(true);
       final pipBounds = _lastPipBounds;
       if (pipBounds != null) {
-        await windowManager.setBounds(_adjustPipBounds(pipBounds, size, aspectRatio));
+        await windowManager.setBounds(
+          _adjustPipBounds(pipBounds, size, aspectRatio),
+        );
       } else {
         await windowManager.setSize(size);
       }
@@ -896,7 +898,7 @@ class PlPlayerController with BlockConfigMixin {
       'volume':
           (PlatformUtils.isMobile ? Pref.playerVolume : volume.value * 100)
               .toString(),
-      'volume-max': kMaxVolume.toString(),
+      'volume-max': (PlatformUtils.isDesktop ? 100.0 : kMaxVolume).toString(),
     };
     final autosync = Pref.autosync;
     if (autosync != '0') {
@@ -974,13 +976,17 @@ class PlPlayerController with BlockConfigMixin {
     );
 
     assert(_videoController == null);
+    _appliedSurfaceWidth = null;
+    _appliedSurfaceHeight = null;
+    _displayBox = null;
 
     _videoController = await VideoController.create(
       player,
       configuration: VideoControllerConfiguration(
-        enableHardwareAcceleration: hwdec != null,
+        // GPU presentation is independent of hardware video decoding.
+        enableHardwareAcceleration: Platform.isWindows || hwdec != null,
         androidAttachSurfaceAfterVideoParameters: false,
-        hwdec: hwdec,
+        hwdec: Platform.isWindows ? (hwdec ?? 'no') : hwdec,
       ),
     );
 
@@ -1171,8 +1177,7 @@ class PlPlayerController with BlockConfigMixin {
       return;
     }
     final now = DateTime.now();
-    if (now.difference(_lastAudioErrorRecoverAt) <
-        const Duration(seconds: 4)) {
+    if (now.difference(_lastAudioErrorRecoverAt) < const Duration(seconds: 4)) {
       return;
     }
     if (now.difference(_lastAudioErrorRecoverAt) >
@@ -1288,12 +1293,16 @@ class PlPlayerController with BlockConfigMixin {
     return 1.0;
   }
 
-  Future<void> _applyVideoOutputSize({bool force = false}) async {
+  Future<void> _applyVideoOutputSize() async {
     final ctr = _videoController;
     if (ctr == null) return;
-    final srcW = _intProp('video-out-params/dw');
-    final srcH = _intProp('video-out-params/dh');
+    var srcW = _intProp('video-out-params/dw');
+    var srcH = _intProp('video-out-params/dh');
     if (srcW == null || srcH == null || srcW < 1 || srcH < 1) return;
+    final rotate = _intProp('video-out-params/rotate');
+    if (rotate == 90 || rotate == 270) {
+      (srcW, srcH) = (srcH, srcW);
+    }
     final scale = _targetSurfaceScale(srcW, srcH);
     // 偶数化：D3D/ANGLE 对纹理尺寸有对齐要求，mpv 侧也按偶数处理更稳。
     int even(double v) {
@@ -1303,25 +1312,20 @@ class PlPlayerController with BlockConfigMixin {
 
     final w = even(srcW * scale);
     final h = even(srcH * scale);
-    if (!force && _appliedSurfaceWidth == w && _appliedSurfaceHeight == h) {
+    if (_appliedSurfaceWidth == w && _appliedSurfaceHeight == h) {
       return;
     }
-    _appliedSurfaceWidth = w;
-    _appliedSurfaceHeight = h;
-
     try {
-      if (force) {
-        final tmpW = w > 2 ? w - 2 : w + 2;
-        final tmpH = h > 2 ? h - 2 : h + 2;
-        final cleared = ctr.setSize(width: tmpW, height: tmpH);
-        if (cleared != null) await cleared;
-      }
       final applied = ctr.setSize(width: w, height: h);
       if (applied != null) await applied;
-    } catch (_) {}
+      if (identical(ctr, _videoController)) {
+        _appliedSurfaceWidth = w;
+        _appliedSurfaceHeight = h;
+      }
+    } catch (error, stack) {
+      Utils.reportError('video surface resize failed: $error', stack);
+    }
   }
-
-
 
   // 网络断连自动重连（含多次尝试）
   void _scheduleReconnect() {
@@ -1352,7 +1356,6 @@ class PlPlayerController with BlockConfigMixin {
     final raw = _mpvProp(name);
     return raw == null ? null : int.tryParse(raw);
   }
-
 
   /// 给 mpv 发一条命令（自愈用）。失败/播放器已释放时静默忽略。
   ///
@@ -1397,8 +1400,6 @@ class PlPlayerController with BlockConfigMixin {
       });
     }
   }
-
-
 
   Future<void> _tryReconnect() async {
     if (_playerCount == 0) {
@@ -1815,13 +1816,14 @@ class PlPlayerController with BlockConfigMixin {
     hideTaskControls();
   }
 
-
   final RxBool volumeIndicator = false.obs;
   Timer? volumeTimer;
   bool volumeInterceptEventStream = false;
 
-  final double maxVolume = PlatformUtils.isDesktop ? Pref.maxVolume : 1.0;
+  double get maxVolume => PlatformUtils.isDesktop ? Pref.maxVolume : 1.0;
   Future<void> setVolume(double volume, {bool showIndicator = true}) async {
+    if (!volume.isFinite) return;
+    volume = volume.clamp(0.0, maxVolume);
     if (this.volume.value != volume) {
       this.volume.value = volume;
       try {
@@ -2463,4 +2465,3 @@ class PlPlayerController with BlockConfigMixin {
     Get.back();
   }
 }
-

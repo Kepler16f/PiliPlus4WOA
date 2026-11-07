@@ -767,7 +767,48 @@ $NewFullscreenRect = @'
     ::GetWindowRect(window, &rect_before_fullscreen_);
 '@
 
+# Preserve aspect ratio and avoid integer division producing a zero dimension.
+# Both axes must use the same scale, including when both exceed the limits.
+$OldSwWidthBounds = @'
+    if (width >= SW_RENDERING_MAX_WIDTH) {
+      return SW_RENDERING_MAX_WIDTH;
+    }
+    if (height >= SW_RENDERING_MAX_HEIGHT) {
+      return width / height * SW_RENDERING_MAX_HEIGHT;
+    }
+'@
+$OldSwHeightBounds = @'
+    if (height >= SW_RENDERING_MAX_HEIGHT) {
+      return SW_RENDERING_MAX_HEIGHT;
+    }
+    if (width >= SW_RENDERING_MAX_WIDTH) {
+      return height / width * SW_RENDERING_MAX_WIDTH;
+    }
+'@
+$NewSwBounds = @'
+    // PiliPlus4WOA: use one floating-point scale for both output axes.
+    if (width <= 0 || height <= 0) return 0;
+    const double scale = std::min(1.0, std::min(
+        static_cast<double>(SW_RENDERING_MAX_WIDTH) / width,
+        static_cast<double>(SW_RENDERING_MAX_HEIGHT) / height));
+'@
+$NewSwWidthBounds = $NewSwBounds + "`n    return std::max<int64_t>(1, static_cast<int64_t>(width * scale));"
+$NewSwHeightBounds = $NewSwBounds + "`n    return std::max<int64_t>(1, static_cast<int64_t>(height * scale));"
+$OldSwCallbackCount = @'
+        flutter::PixelBufferTexture([&](auto, auto) {
+          std::lock_guard<std::mutex> lock(textures_mutex_);
+'@
+$NewSwCallbackCount = @'
+        flutter::PixelBufferTexture([&](auto, auto) {
+          std::lock_guard<std::mutex> lock(textures_mutex_);
+          // Include software presentation in the callback count.
+          g_mkTrace.video_cb++;
+'@
+
 $edits = @(
+    @{ file = $videoPath; old = $OldSwWidthBounds; new = $NewSwWidthBounds; label = "video_output.cc: nonzero proportional software width" },
+    @{ file = $videoPath; old = $OldSwHeightBounds; new = $NewSwHeightBounds; label = "video_output.cc: nonzero proportional software height" },
+    @{ file = $videoPath; old = $OldSwCallbackCount; new = $NewSwCallbackCount; label = "video_output.cc: count software texture callbacks" },
     @{ file = $headerPath; old = $OldClassDecl;      new = ($TraceHeader + $OldClassDecl); label = "angle_surface_manager.h: trace counters" },
     @{ file = $anglePath;  old = $OldInstanceCount;  new = $NewInstanceCount;               label = "angle_surface_manager.cc: g_mkTrace definition" },
     @{ file = $anglePath;  old = $OldSetSize;        new = $NewSetSize;                     label = "angle_surface_manager.cc: SetSize under mutex" },

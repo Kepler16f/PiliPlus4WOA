@@ -1084,7 +1084,9 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.showWindowTitleBar, defaultValue: true);
 
   static double get desktopVolume =>
-      _setting.get(SettingBoxKey.desktopVolume, defaultValue: 1.0);
+      (_setting.get(SettingBoxKey.desktopVolume, defaultValue: 1.0) as num)
+          .toDouble()
+          .clamp(0.0, maxVolume);
 
   static SkipType get pgcSkipType =>
       SkipType.values[_setting.get(SettingBoxKey.pgcSkipType) ??
@@ -1162,7 +1164,9 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.playerVolume, defaultValue: 100.0);
 
   static double get maxVolume => // desktop
-      _setting.get(SettingBoxKey.maxVolume, defaultValue: 2.0);
+  (_setting.get(SettingBoxKey.maxVolume, defaultValue: 1.0) as num)
+      .toDouble()
+      .clamp(0.01, 1.0);
 
   static List? get liveStream => _setting.get(SettingBoxKey.liveStream);
 
