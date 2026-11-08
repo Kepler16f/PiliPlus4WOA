@@ -49,7 +49,7 @@ class BottomControl extends StatelessWidget {
       ..hoverDx = null
       ..position.value = milliseconds ~/ 1000
       ..onSeekEnd()
-      ..seekTo(Duration(milliseconds: milliseconds), isSeek: false);
+      ..seekTo(Duration(milliseconds: milliseconds));
   }
 
   void _onHover(double dx, int seconds) {
@@ -136,8 +136,7 @@ class BottomControl extends StatelessWidget {
                         child: ViewPointSegmentProgressBar(
                           segments: videoDetailController.viewPointList,
                           onSeek: PlatformUtils.isDesktop
-                              ? (position) =>
-                                    controller.seekTo(position, isSeek: false)
+                              ? controller.seekTo
                               : null,
                         ),
                       ),
