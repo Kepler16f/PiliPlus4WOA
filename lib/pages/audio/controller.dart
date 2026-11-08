@@ -59,7 +59,8 @@ class AudioController extends GetxController
         FavMixin,
         BlockConfigMixin,
         BlockMixin,
-        AudioNormalizationMixin {
+        AudioNormalizationMixin,
+        PlayerVolumeMixin {
   late Int64 id;
   late Int64 oid;
   late List<Int64> subId;
@@ -143,14 +144,14 @@ class AudioController extends GetxController
       _lastVolume = null;
     }
     desktopVolume.value = volume;
-    player?.setVolume(volume * 100);
+    setVolumeCapped(player, volume);
   }
 
   void syncVolume([_]) {
     final volume = desktopVolume.value;
     PlPlayerController.instance
       ?..volume.value = volume
-      ..videoPlayerController?.setVolume(volume * 100);
+      ..setVolumeCapped(player, volume);
     GStorage.setting.put(SettingBoxKey.desktopVolume, volume.toPrecision(3));
   }
 
@@ -391,7 +392,7 @@ class AudioController extends GetxController
         options: {
           if (Platform.isAndroid) 'ao': Pref.audioOutput,
           'volume': PlatformUtils.isDesktop
-              ? (desktopVolume.value * 100).toString()
+              ? '100'
               : Pref.playerVolume.toString(),
           ...Pref.initBuffer(),
         },
@@ -401,6 +402,9 @@ class AudioController extends GetxController
       player!.dispose();
       player = null;
       return;
+    }
+    if (PlatformUtils.isDesktop) {
+      await setVolumeCapped(player, desktopVolume.value);
     }
     final stream = player!.stream;
     _subscriptions = [

@@ -515,8 +515,6 @@ Future<void> _showMaxVolumeDialog(
   return showVolumeDialog(
     context,
     title: const Text('最高音量'),
-    min: 1,
-    max: 100,
     value: Pref.maxVolume * 100,
     onChanged: (rawValue) {
       final maxVolume = (rawValue / 100).toPrecision(2);

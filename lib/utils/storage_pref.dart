@@ -1192,9 +1192,9 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.playerVolume, defaultValue: 100.0);
 
   static double get maxVolume => // desktop
-  (_setting.get(SettingBoxKey.maxVolume, defaultValue: 1.0) as num)
+  (_setting.get(SettingBoxKey.maxVolume, defaultValue: 2.0) as num)
       .toDouble()
-      .clamp(0.01, 1.0);
+      .clamp(0.01, 3.0);
 
   static List? get liveStream => _setting.get(SettingBoxKey.liveStream);
 

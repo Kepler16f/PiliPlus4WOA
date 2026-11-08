@@ -71,7 +71,7 @@ import 'package:window_manager/window_manager.dart';
 typedef PlayCallback = Future<void>? Function();
 typedef PlayOwner = ({String tag, Type? type});
 
-class PlPlayerController with BlockConfigMixin {
+class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   Player? _videoPlayerController;
   VideoController? _videoController;
 
@@ -895,9 +895,9 @@ class PlPlayerController with BlockConfigMixin {
       // 原因见 storage_pref.dart 里 effectiveVideoSync 的注释。
       'video-sync': Pref.effectiveVideoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
-      'volume':
-          (PlatformUtils.isMobile ? Pref.playerVolume : volume.value * 100)
-              .toString(),
+      // 桌面端 >100% 的增益走 af 滤镜链（见 PlayerVolumeMixin），
+      // mpv 的 volume 本身恒定在 100，避免 ao 侧硬削波。
+      'volume': (PlatformUtils.isMobile ? Pref.playerVolume : 100).toString(),
       'volume-max': (PlatformUtils.isDesktop ? 100.0 : kMaxVolume).toString(),
     };
     final autosync = Pref.autosync;
@@ -1045,6 +1045,10 @@ class PlPlayerController with BlockConfigMixin {
         return;
       }
       _videoPlayerController = player;
+      if (PlatformUtils.isDesktop) {
+        // 注意：形参 volume 是响度信息，这里要的是播放器音量 RxDouble。
+        await setVolumeCapped(player, this.volume.value);
+      }
       if (isAnim && superResolutionType.value != .disable) {
         await setShader();
       }
@@ -1910,7 +1914,7 @@ class PlPlayerController with BlockConfigMixin {
       this.volume.value = volume;
       try {
         if (PlatformUtils.isDesktop) {
-          await _videoPlayerController!.setVolume(volume * 100);
+          await setVolumeCapped(_videoPlayerController, volume);
         } else {
           FlutterVolumeController.updateShowSystemUI(false);
           await FlutterVolumeController.setVolume(volume);
