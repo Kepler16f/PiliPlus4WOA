@@ -114,7 +114,7 @@ class _DownloadPanelState extends State<DownloadPanel> {
   Widget _buildHeader() {
     final textStyle = TextStyle(color: colorScheme.onSurfaceVariant);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 0, 12),
+      padding: const .symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
           Expanded(
@@ -184,23 +184,23 @@ class _DownloadPanelState extends State<DownloadPanel> {
           // ARM64 修改版：保留本项目原有的网络状态指示（移动端 + 桌面调试模式
           // 显示「当前网络：WIFI/数据」文字），上游 2.2.0 改成了图标。
           if (kDebugMode || PlatformUtils.isMobile)
-            Padding(
-              padding: const .only(left: 6, right: 16),
-              child: StreamBuilder(
-                stream: Connectivity().onConnectivityChanged,
-                builder: (context, snapshot) {
-                  if (snapshot.data case final data?) {
-                    final network = data.contains(ConnectivityResult.wifi)
-                        ? 'WIFI'
-                        : '数据';
-                    return Text(
+            StreamBuilder(
+              stream: Connectivity().onConnectivityChanged,
+              builder: (context, snapshot) {
+                if (snapshot.data case final data?) {
+                  final network = data.contains(ConnectivityResult.wifi)
+                      ? 'WIFI'
+                      : '数据';
+                  return Padding(
+                    padding: const .only(left: 6),
+                    child: Text(
                       '当前网络：$network',
                       style: TextStyle(color: colorScheme.onSurfaceVariant),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
             ),
         ],
       ),
