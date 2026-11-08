@@ -11,6 +11,7 @@ import 'package:PiliPlus/common/widgets/scaffold/simple_scaffold.dart';
 import 'package:PiliPlus/common/widgets/scroll_physics.dart'
     show tabBarScrollPhysics;
 import 'package:PiliPlus/common/widgets/sliver/sliver_to_box_adapter.dart';
+import 'package:PiliPlus/models/common/dynamic/article_type.dart';
 import 'package:PiliPlus/models/common/image_preview_type.dart';
 import 'package:PiliPlus/models/dynamics/article_content_model.dart' show Pic;
 import 'package:PiliPlus/models/dynamics/result.dart' show DynamicStat, Tribee;
@@ -29,6 +30,7 @@ import 'package:PiliPlus/utils/grid.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/num_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
+import 'package:PiliPlus/utils/reply_scheme_helper.dart';
 import 'package:PiliPlus/utils/share_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:cached_network_image_ce/cached_network_image.dart';
@@ -40,6 +42,28 @@ import 'package:material_ui/material_ui.dart';
 
 class ArticlePage extends StatefulWidget {
   const ArticlePage({super.key});
+
+  static Future<void>? toArticlePage({
+    required String id,
+    required ArticleType type,
+    int? rootRpId,
+    int? secondRpId,
+    bool viewComment = false,
+    bool off = false,
+  }) {
+    return Get.offOrToNamed(
+      '/articlePage',
+      arguments: {
+        'id': id,
+        'type': type,
+        rootRpIdKey: ?rootRpId,
+        secondRpIdKey: ?secondRpId,
+        if (viewComment) 'viewComment': true,
+      },
+      off: off,
+      preventDuplicates: false,
+    );
+  }
 
   @override
   State<ArticlePage> createState() => _ArticlePageState();
@@ -63,9 +87,18 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage>
 
   @override
   void initState() {
+<<<<<<< HEAD
     super.initState();
     if (Get.parameters.containsKey('viewComment') ||
         controller.rootRpId != null) {
+=======
+    final args = Get.arguments;
+    controller = Get.putOrFind(
+      ArticleController.new,
+      tag: (args['type']! as ArticleType).name + args['id']!,
+    );
+    if (args.containsKey('viewComment') || controller.rootRpId != null) {
+>>>>>>> 24f798d0d (handle dyn foldAction)
       _centerKey = UniqueKey();
     }
   }
@@ -241,7 +274,7 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage>
             content = const SliverToBoxAdapter(child: Text('NULL'));
           }
 
-          final isOpus = controller.type != 'read';
+          final isOpus = controller.type == .opus;
 
           return SliverMainAxisGroup(
             slivers: [
