@@ -168,8 +168,11 @@ void main() async {
 
     await windowManager.ensureInitialized();
 
+    // 最小窗口尺寸按当前显示器工作区收敛：写死的 400×720 在小屏
+    // （如 1024×640 的平板）上比整屏还高，窗口会卡在屏幕外无法收缩。
+    final workArea = await calcWorkArea();
     final windowOptions = WindowOptions(
-      minimumSize: const Size(400, 720),
+      minimumSize: calcDesktopMinSize(workArea),
       skipTaskbar: false,
       titleBarStyle: Pref.showWindowTitleBar
           ? TitleBarStyle.normal
@@ -177,9 +180,8 @@ void main() async {
       title: Constants.appName,
     );
     windowManager.waitUntilReadyToShow(windowOptions, () async {
-      final windowSize = Pref.windowSize;
       await windowManager.setBounds(
-        await calcWindowPosition(windowSize) & windowSize,
+        calcDesktopWindowBounds(Pref.windowSize, workArea),
       );
       if (Pref.isWindowMaximized) await windowManager.maximize();
       await windowManager.show();

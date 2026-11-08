@@ -17,7 +17,8 @@ class SelectDialog<T> extends StatelessWidget {
   final T? value;
   final String title;
   final List<(T, String)> values;
-  final Widget Function(BuildContext, int)? subtitleBuilder;
+  final Widget? Function(BuildContext context, int index, T value)?
+  subtitleBuilder;
   final bool toggleable;
 
   const SelectDialog({
@@ -55,11 +56,8 @@ class SelectDialog<T> extends StatelessWidget {
                     toggleable: toggleable,
                     dense: true,
                     value: item.$1,
-                    title: Text(
-                      item.$2,
-                      style: titleMedium,
-                    ),
-                    subtitle: subtitleBuilder?.call(context, index),
+                    title: Text(item.$2, style: titleMedium),
+                    subtitle: subtitleBuilder?.call(context, index, item.$1),
                   );
                 },
               ),
@@ -250,7 +248,7 @@ class _CdnSelectDialogState extends State<CdnSelectDialog> {
       values: CDNService.values.map((i) => (i, i.desc)).toList(),
       value: VideoUtils.cdnService,
       subtitleBuilder: _cdnSpeedTest
-          ? (context, index) {
+          ? (context, index, type) {
               final item = _cdnResList[index];
               return ValueListenableBuilder(
                 valueListenable: item,
