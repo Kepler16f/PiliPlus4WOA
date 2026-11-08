@@ -1937,12 +1937,16 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   }
 
   void onSeekEnd() {
+<<<<<<< HEAD
     if (seekToPos != null) {
       feedBack();
     }
     if (showSeekPreview) {
       showPreview.value = false;
     }
+=======
+    hidePreviewIfNeeded();
+>>>>>>> dc829bf26 (fix #3522)
     hasToasted = false;
     isSeeking.value = false;
     _updatePlaybackState();
@@ -2515,8 +2519,19 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     _disposePreviewBitmaps();
   }
 
-  void _clearPreview() {
+  void hidePreviewIfNeeded() {
+    if (showSeekPreview) {
+      hidePreview();
+    }
+  }
+
+  void hidePreview() {
+    hoverDx = null;
     showPreview.value = false;
+  }
+
+  void _clearPreview() {
+    hidePreview();
     previewIndex.value = null;
     videoShot = null;
     _disposePreviewBitmaps();
