@@ -19,6 +19,7 @@ import 'package:PiliPlus/pages/rank/view.dart';
 import 'package:PiliPlus/pages/subscription_detail/view.dart';
 import 'package:PiliPlus/pages/video/reply_reply/view.dart';
 import 'package:PiliPlus/utils/bili_utils.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -33,7 +34,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
-import 'package:window_manager/window_manager.dart';
 
 abstract final class PiliScheme {
   static late AppLinks appLinks;
@@ -52,9 +52,10 @@ abstract final class PiliScheme {
     );
   }
 
-  static Future<bool> _desktopRoutePush(Uri uri) async {
-    await windowManager.show();
-    await windowManager.focus();
+  static Future<bool> _desktopRoutePush(Uri uri) {
+    WindowController.instance.window
+      ?..show()
+      ..focus();
     return routePush(uri);
   }
 

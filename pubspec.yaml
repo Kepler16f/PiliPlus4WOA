@@ -137,6 +137,7 @@ dependencies:
   media_kit_libs_video: 1.0.5
   media_kit_video: 1.2.5
   mime: ^2.0.0
+  nativeapi: ^0.5.5
   native_device_orientation:
     git:
       url: https://github.com/bggRGjQaUbCoE/flutter_native_device_orientation.git
@@ -153,7 +154,7 @@ dependencies:
   re_highlight: ^0.0.3
   saver_gallery: ^5.0.2
   screen_brightness_platform_interface: ^2.1.0
-  screen_retriever: ^0.2.0
+  screen_retriever: ^0.3.0
   share_plus: ^13.1.0
   stream_transform: ^2.1.1
   super_sliver_list:
@@ -173,11 +174,7 @@ dependencies:
       url: https://github.com/wgh136/webdav_client.git
       ref: main
   win32: ^6.3.0
-  window_manager:
-    git:
-      url: https://github.com/bggRGjQaUbCoE/window_manager.git
-      path: packages/window_manager
-      ref: main
+  window_manager: ^0.6.0
 
 dependency_overrides:
   flutter_inappwebview_android:

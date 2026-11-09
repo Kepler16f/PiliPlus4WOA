@@ -65,13 +65,10 @@ class MainController extends GetxController
   late final optTabletNav = Pref.optTabletNav;
 
   late bool directExitOnBack = Pref.directExitOnBack;
-  late bool showTrayIcon = Pref.showTrayIcon;
-  late bool minimizeOnExit = Pref.minimizeOnExit;
-  late bool pauseOnMinimize = Pref.pauseOnMinimize;
-  // 原 `late bool isPlaying = false;` 已删除：它只被 main/view.dart 的
-  // 窗口暂停/恢复逻辑读写，而那套逻辑现改用 _MainAppState 自己的
-  // _pausedForBackground 标记（见 main/view.dart：一是恢复后不清零会把
-  // 用户手动按下的暂停又按回去，二是重复隐藏会被覆盖成 false 导致还原不续播）。
+  // 原 `showTrayIcon` / `minimizeOnExit` / `pauseOnMinimize` / `isPlaying`
+  // 已移到 WindowController / TrayController（ARM64 修改版：窗口后端迁到
+  // nativeapi 后，窗口状态统一由 lib/utils/desktop/window_controller.dart 持有）。
+  // 「本次暂停是为了进后台」的标记也一并搬到了那里。
 
   static const _period = 5 * 60 * 1000;
   late int _lastSelectTime = 0;

@@ -16,8 +16,8 @@ import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
-import 'package:PiliPlus/utils/calc_window_position.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
+import 'package:PiliPlus/utils/desktop/calc_window_position.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/extension/core_palettes_ext.dart';
 import 'package:PiliPlus/utils/extension/theme_ext.dart';
@@ -46,7 +46,8 @@ import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
-import 'package:window_manager/window_manager.dart' hide calcWindowPosition;
+import 'package:nativeapi/nativeapi.dart' as nativeapi show Size, Rectangle;
+import 'package:window_manager/window_manager.dart';
 
 WebViewEnvironment? webViewEnvironment;
 
@@ -165,28 +166,6 @@ void main() async {
     }
   } else if (PlatformUtils.isDesktop) {
     FocusManager.instance.addEarlyKeyEventHandler(_onKeyEvent);
-
-    await windowManager.ensureInitialized();
-
-    // 最小窗口尺寸按当前显示器工作区收敛：写死的 400×720 在小屏
-    // （如 1024×640 的平板）上比整屏还高，窗口会卡在屏幕外无法收缩。
-    final workArea = await calcWorkArea();
-    final windowOptions = WindowOptions(
-      minimumSize: calcDesktopMinSize(workArea),
-      skipTaskbar: false,
-      titleBarStyle: Pref.showWindowTitleBar
-          ? TitleBarStyle.normal
-          : TitleBarStyle.hidden,
-      title: Constants.appName,
-    );
-    windowManager.waitUntilReadyToShow(windowOptions, () async {
-      await windowManager.setBounds(
-        calcDesktopWindowBounds(Pref.windowSize, workArea),
-      );
-      if (Pref.isWindowMaximized) await windowManager.maximize();
-      await windowManager.show();
-      await windowManager.focus();
-    });
   }
 
   if (Pref.dynamicColor) {
@@ -214,6 +193,41 @@ void main() async {
     );
   } else {
     runApp(const MyApp());
+  }
+
+  if (PlatformUtils.isDesktop) {
+    // 窗口后端已迁到 nativeapi（window_manager 0.6.0 直接 re-export
+    // nativeapi 的 Window / WindowManager）。初始/恢复的边界与最小尺寸都按
+    // 当前显示器工作区收敛，写死的 400×720 在小屏（如 1024×640 的平板）
+    // 上比整屏还高，窗口会卡在屏幕外无法收缩。
+    final window = WindowManager.instance.getCurrent();
+    if (window != null) {
+      final showTitleBar = Pref.showWindowTitleBar;
+      // macOS 隐藏标题栏时改用 contentUnderTitleBar，保持窗口可拖动
+      final useContentUnderTitleBar = Platform.isMacOS && !showTitleBar;
+      final (nativeapi.Size minSize, nativeapi.Rectangle bounds) =
+          calcWindowBounds();
+      window
+        ..titleBarStyle = useContentUnderTitleBar || showTitleBar
+            ? TitleBarStyle.normal
+            : TitleBarStyle.hidden
+        ..isWindowControlButtonsVisible = true
+        ..bounds = bounds
+        ..minimumSize = minSize
+        ..isVisibleInTaskbar = true
+        ..title = Constants.appName;
+      if (useContentUnderTitleBar) window.setContentUnderTitleBar(true);
+      if (Pref.isWindowMaximized) window.maximize();
+      void show([_]) => window
+        ..focus()
+        ..show();
+      switch (WidgetsBinding.instance.schedulerPhase) {
+        case .idle || .postFrameCallbacks:
+          WidgetsBinding.instance.scheduleFrameCallback(show);
+        case .transientCallbacks || .midFrameMicrotasks || .persistentCallbacks:
+          WidgetsBinding.instance.addPostFrameCallback(show);
+      }
+    }
   }
 }
 

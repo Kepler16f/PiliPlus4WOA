@@ -13,13 +13,13 @@ import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
 import 'package:PiliPlus/pages/common/slide/common_slide_page.dart';
 import 'package:PiliPlus/pages/home/controller.dart';
-import 'package:PiliPlus/pages/main/controller.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
 import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/filtering_text.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
@@ -44,11 +44,7 @@ List<SettingsModel> get extraSettings => [
       leading: const Icon(Icons.exit_to_app),
       setKey: SettingBoxKey.minimizeOnExit,
       defaultVal: true,
-      onChanged: (value) {
-        try {
-          Get.find<MainController>().minimizeOnExit = value;
-        } catch (_) {}
-      },
+      onChanged: (value) => WindowController.instance.minimizeOnExit = value,
     ),
     NormalModel(
       title: '缓存路径',

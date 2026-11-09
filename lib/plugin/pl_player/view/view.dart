@@ -1214,7 +1214,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         if ((event.position - start).distance < slop) return;
         _pipDragging = true;
         _stopPipDrag();
-        windowManager.startDragging();
+        // 窗口后端迁到 nativeapi 后，原生拖动从 window_manager 的全局单例
+        // 改为当前窗口对象上调用。
+        WindowManager.instance.getCurrent()?.startDragging();
         return;
       }
     } else if (event is PointerUpEvent || event is PointerCancelEvent) {

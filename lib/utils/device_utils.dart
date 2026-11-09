@@ -3,10 +3,14 @@ import 'dart:io' show Platform, exit;
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:flutter/widgets.dart' show WidgetsBinding, Size;
+import 'package:nativeapi/nativeapi.dart' as nativeapi show Size;
 import 'package:win32/win32.dart' as kernel32;
 
 abstract final class DeviceUtils {
   static final int sdkInt = AndroidHelper.sdkInt();
+
+  /// 桌面端窗口的最小尺寸。实际使用时会按当前显示器工作区收敛。
+  static const desktopMinSize = nativeapi.Size(width: 400, height: 720);
 
   static bool get isTablet {
     return size.shortestSide >= 600;

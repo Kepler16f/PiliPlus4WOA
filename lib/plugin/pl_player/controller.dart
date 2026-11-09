@@ -36,11 +36,12 @@ import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/asset_utils.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/box_ext.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
-import 'package:PiliPlus/utils/extension/size_ext.dart';
+import 'package:PiliPlus/utils/extension/native_geometry_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -66,7 +67,7 @@ import 'package:native_device_orientation/native_device_orientation.dart';
 import 'package:path/path.dart' as path;
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:nativeapi/nativeapi.dart' as nativeapi;
 
 typedef PlayCallback = Future<void>? Function();
 typedef PlayOwner = ({String tag, Type? type});
@@ -229,12 +230,16 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   late bool isDesktopPip = false;
   bool _pipTransitioning = false;
   Timer? _displayBoxDebounce;
-  Rect? _lastWindowBounds;
+  nativeapi.Rectangle? _lastWindowBounds;
   // 上游 2.1.6（#2997 画中画窗口记忆）：跨进入/退出记忆 PiP 窗口的位置与尺寸，
   // 让竖屏视频退出、再进横屏视频时，PiP 窗口按新比例就地调整而不是弹回默认尺寸。
-  static Rect? _lastPipBounds;
+  static nativeapi.Rectangle? _lastPipBounds;
 
-  Rect _adjustPipBounds(Rect lastRect, Size size, double aspectRatio) {
+  nativeapi.Rectangle _adjustPipBounds(
+    nativeapi.Rectangle lastRect,
+    nativeapi.Size size,
+    double aspectRatio,
+  ) {
     final lastSize = lastRect.size;
     final lastOrientation = lastSize.orientation;
     final orientation = size.orientation;
@@ -262,26 +267,24 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
             width = size.width;
           }
       }
-      return _lastPipBounds = Rect.fromLTWH(
-        lastRect.left,
-        lastRect.top,
-        width,
-        height,
+      return _lastPipBounds = nativeapi.Rectangle(
+        x: lastRect.x,
+        y: lastRect.y,
+        width: width,
+        height: height,
       );
     }
-    return _lastPipBounds = Rect.fromLTWH(
-      lastRect.left,
-      lastRect.top,
-      lastSize.width,
-      lastSize.width / aspectRatio,
+    return _lastPipBounds = nativeapi.Rectangle(
+      x: lastRect.x,
+      y: lastRect.y,
+      width: lastSize.width,
+      height: lastSize.width / aspectRatio,
     );
   }
 
-  bool updatePipBounds() {
+  bool updatePipBounds(nativeapi.Window window) {
     if (isDesktopPip) {
-      windowManager.getBounds().then((rect) {
-        if (isDesktopPip) _lastPipBounds = rect;
-      });
+      _lastPipBounds = window.bounds;
       return true;
     }
     return false;
@@ -289,12 +292,16 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
 
   late final showWindowTitleBar = Pref.showWindowTitleBar;
   late final RxBool isAlwaysOnTop = false.obs;
-  Future<void> setAlwaysOnTop(bool value) {
+  void setAlwaysOnTop(bool value, {nativeapi.Window? window}) {
+    window ??= WindowController.instance.window;
+    if (window == null) return;
     isAlwaysOnTop.value = value;
-    return windowManager.setAlwaysOnTop(value);
+    window.isAlwaysOnTop = value;
   }
 
   Future<void> exitDesktopPip() async {
+    final window = WindowController.instance.window;
+    if (window == null) return;
     final bounds = _lastWindowBounds;
     // 诊断：确认按钮点击是否真的走到了这里、以及窗口恢复参数是否有效。
     // （用户报过「退出画中画按钮点击没反应」——若日志无此行，问题在点击层面；
@@ -311,14 +318,15 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     }
     try {
       if (showWindowTitleBar) {
-        await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+        window.titleBarStyle = nativeapi.TitleBarStyle.normal;
       }
-      await windowManager.setMinimumSize(const Size(400, 700));
-      await windowManager.setAspectRatio(0);
+      window
+        ..minimumSize = const nativeapi.Size(width: 400, height: 700)
+        ..aspectRatio = 0;
       if (bounds != null) {
-        await windowManager.setBounds(bounds);
+        window.bounds = bounds;
       }
-      await setAlwaysOnTop(false);
+      setAlwaysOnTop(false, window: window);
       Utils.reportError('pip: exitDesktopPip done', null);
     } catch (e) {
       Utils.reportError('pip: exitDesktopPip failed: $e', null);
@@ -329,6 +337,8 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   }
 
   Future<void> enterDesktopPip() async {
+    final window = WindowController.instance.window;
+    if (window == null) return;
     if (isFullScreen.value) return;
 
     Utils.reportError('pip: enterDesktopPip', null);
@@ -343,16 +353,16 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     }
 
     try {
-      _lastWindowBounds = await windowManager.getBounds();
+      _lastWindowBounds = window.bounds;
 
       if (showWindowTitleBar) {
-        await windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+        window.titleBarStyle = nativeapi.TitleBarStyle.hidden;
       }
 
       const shortSide = 280.0;
       const minShortSide = 160.0;
-      final Size size;
-      final Size minimumSize;
+      final nativeapi.Size size;
+      final nativeapi.Size minimumSize;
       final state = videoPlayerController!.state;
       int width = state.width;
       int height = state.height;
@@ -364,24 +374,34 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       }
       final aspectRatio = width / height;
       if (height > width) {
-        size = Size(shortSide, shortSide / aspectRatio);
-        minimumSize = Size(minShortSide, minShortSide / aspectRatio);
-      } else {
-        size = Size(shortSide * aspectRatio, shortSide);
-        minimumSize = Size(minShortSide * aspectRatio, minShortSide);
-      }
-
-      await windowManager.setMinimumSize(minimumSize);
-      await setAlwaysOnTop(true);
-      final pipBounds = _lastPipBounds;
-      if (pipBounds != null) {
-        await windowManager.setBounds(
-          _adjustPipBounds(pipBounds, size, aspectRatio),
+        size = nativeapi.Size(
+          width: shortSide,
+          height: shortSide / aspectRatio,
+        );
+        minimumSize = nativeapi.Size(
+          width: minShortSide,
+          height: minShortSide / aspectRatio,
         );
       } else {
-        await windowManager.setSize(size);
+        size = nativeapi.Size(
+          width: shortSide * aspectRatio,
+          height: shortSide,
+        );
+        minimumSize = nativeapi.Size(
+          width: minShortSide * aspectRatio,
+          height: minShortSide,
+        );
       }
-      await windowManager.setAspectRatio(width / height);
+
+      window.minimumSize = minimumSize;
+      setAlwaysOnTop(true, window: window);
+      final pipBounds = _lastPipBounds;
+      if (pipBounds != null) {
+        window.bounds = _adjustPipBounds(pipBounds, size, aspectRatio);
+      } else {
+        window.contentSize = size;
+      }
+      window.aspectRatio = aspectRatio;
     } finally {
       _pipTransitioning = false;
       unawaited(_applyVideoOutputSize());
@@ -2385,7 +2405,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     // dataStatus.close();
 
     if (PlatformUtils.isDesktop && isAlwaysOnTop.value) {
-      windowManager.setAlwaysOnTop(false);
+      setAlwaysOnTop(false);
     }
 
     _removeListeners();
