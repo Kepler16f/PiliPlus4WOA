@@ -400,13 +400,13 @@ class DownloadService extends GetxService {
 
   Future<bool> updateSegments(BiliDownloadEntryInfo entry) {
     if (entry.pageData != null) {
-      return _updateBlockSegments(entry);
+      return updateUgcSegments(entry);
     } else {
-      return _updatePgcSegments(entry);
+      return updatePgcSegmentsAndVolume(entry);
     }
   }
 
-  Future<bool> _updateBlockSegments(BiliDownloadEntryInfo entry) async {
+  Future<bool> updateUgcSegments(BiliDownloadEntryInfo entry) async {
     final res = await SponsorBlock.getSkipSegments(
       bvid: entry.bvid,
       cid: entry.pageData!.cid,
@@ -421,7 +421,7 @@ class DownloadService extends GetxService {
     return false;
   }
 
-  Future<bool> _updatePgcSegments(BiliDownloadEntryInfo entry) async {
+  Future<bool> updatePgcSegmentsAndVolume(BiliDownloadEntryInfo entry) async {
     final ep = entry.ep;
     if (ep == null) return false;
     final res = await VideoHttp.videoUrl(
@@ -436,11 +436,24 @@ class DownloadService extends GetxService {
         'pugv' => .pugv,
         _ => .pgc,
       },
+      voiceBalance: true,
     );
     if (res case Success(:final response)) {
+      bool needsUpdate = false;
+
       final clipInfoList = response.clipInfoList;
       if (clipInfoList != null && clipInfoList.isNotEmpty) {
         entry.segments = clipInfoList;
+        needsUpdate = true;
+      }
+
+      final volume = response.volume;
+      if (volume != null) {
+        entry.volume = volume;
+        needsUpdate = true;
+      }
+
+      if (needsUpdate) {
         await _updateBiliDownloadEntryJson(entry);
       }
       return true;
@@ -512,6 +525,36 @@ class DownloadService extends GetxService {
     }
   }
 
+  Future<bool> updateVolume(BiliDownloadEntryInfo entry) {
+    if (entry.pageData != null) {
+      return updateUgcVolume(entry);
+    } else {
+      return updatePgcSegmentsAndVolume(entry);
+    }
+  }
+
+  Future<bool> updateUgcVolume(BiliDownloadEntryInfo entry) async {
+    assert(entry.ep == null);
+    final res = await VideoHttp.videoUrl(
+      avid: entry.avid,
+      bvid: entry.bvid,
+      cid: entry.cid,
+      qn: entry.preferedVideoQuality,
+      tryLook: false,
+      videoType: .ugc,
+      voiceBalance: true,
+    );
+    if (res case Success(:final response)) {
+      final volume = response.volume;
+      if (volume != null) {
+        entry.volume = volume;
+        await _updateBiliDownloadEntryJson(entry);
+      }
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _startDownload(BiliDownloadEntryInfo entry) async {
     try {
       if (!await downloadDanmaku(entry: entry)) {
@@ -520,12 +563,13 @@ class DownloadService extends GetxService {
 
       // ugc segments
       if (entry.pageData != null && Pref.enableSponsorBlock) {
-        _updateBlockSegments(entry);
+        updateUgcSegments(entry);
       }
 
       _updateCurStatus(DownloadStatus.getPlayUrl);
 
       final noSegmentBefore = entry.segments == null;
+      final noVolumeBefore = entry.volume == null;
 
       final qaBefore = entry.preferedVideoQuality;
       final mediaFileInfo = await DownloadHttp.getVideoUrl(
@@ -536,8 +580,9 @@ class DownloadService extends GetxService {
       );
       if (qaBefore != entry.preferedVideoQuality) waitDownloadQueue.refresh();
 
-      // pgc segments
-      if (noSegmentBefore && entry.segments != null) {
+      // pgc segments, volume
+      if ((noSegmentBefore && entry.segments != null) ||
+          (noVolumeBefore && entry.volume != null)) {
         await _updateBiliDownloadEntryJson(entry);
       }
 
@@ -595,10 +640,10 @@ class DownloadService extends GetxService {
         default:
           break;
       }
-    } catch (e) {
+    } catch (e, s) {
       _updateCurStatus(DownloadStatus.failPlayUrl);
       if (kDebugMode) {
-        debugPrint('get download url error: $e');
+        debugPrint('get download url error: $e\n\n$s');
       }
     }
   }
