@@ -310,12 +310,6 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     isDesktopPip = false;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
-    final player = _videoPlayerController;
-    if (player is NativePlayer) {
-      try {
-        player.setProperty('framedrop', 'vo');
-      } catch (_) {}
-    }
     try {
       if (showWindowTitleBar) {
         window.titleBarStyle = nativeapi.TitleBarStyle.normal;
@@ -345,12 +339,6 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     isDesktopPip = true;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
-    final player = _videoPlayerController;
-    if (player is NativePlayer) {
-      try {
-        player.setProperty('framedrop', 'no');
-      } catch (_) {}
-    }
 
     try {
       _lastWindowBounds = window.bounds;
@@ -1303,6 +1291,12 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   /// 目标倍率：显示区域所需的倍率，**向上**取整到阶梯里不小于它的最小一档
   /// （保证表面 ≥ 显示像素，不糊），并且永远 ≤ 1.0（不用小窗去放大片源）。
   double _targetSurfaceScale(int dw, int dh) {
+    if (Platform.isWindows) {
+      // Windows 平台使用 D3D11 原生零拷贝硬件解码渲染（MailboxSwapChain）。
+      // 动态降低纹理尺寸会导致每次尺寸变动都销毁并重建 D3D11 交换链与 Flutter 纹理注册，
+      // 造成严重的画面卡顿、闪烁与掉帧。GPU 栅格化在原尺寸下缩放几乎零开销，因此固定使用 1.0。
+      return 1.0;
+    }
     final box = _displayBox;
     if (box == null || box.width < 1 || box.height < 1) return 1.0;
     final needed = min(

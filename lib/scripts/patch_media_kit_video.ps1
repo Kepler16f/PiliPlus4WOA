@@ -95,6 +95,7 @@ $anglePath = Join-Path $videoDir "angle_surface_manager.cc"
 $videoPath = Join-Path $videoDir "video_output.cc"
 $videoHeaderPath = Join-Path $videoDir "video_output.h"
 $utilsPath = Join-Path $videoDir "utils.cc"
+$mailboxPath = Join-Path $videoDir "mailbox_swap_chain.cc"
 
 # media_kit_video 的 Windows 渲染后端有两套，补丁内容完全不同：
 #   * ANGLE/OpenGL（旧）：存在 angle_surface_manager.*
@@ -114,6 +115,9 @@ if ($useAngle) {
     foreach ($p in @($headerPath, $anglePath)) {
         if (-not (Test-Path $p)) { throw "missing source file: $p" }
     }
+}
+if ($useDxgi) {
+    if (-not (Test-Path $mailboxPath)) { throw "missing source file: $mailboxPath" }
 }
 if (-not $useAngle -and -not $useDxgi) {
     throw "media_kit_video/windows has neither angle_surface_manager.cc nor d3d11_renderer.cc -- unknown renderer variant, update lib/scripts/patch_media_kit_video.ps1"
@@ -869,6 +873,71 @@ void VideoOutput::SetSize(std::optional<int64_t> width,
     if (width.has_value()) {
 '@
 
+$OldDxgiTimingOffset = @'
+    mpv_set_option_string(handle_, "video-sync", "audio");
+    mpv_set_option_string(handle_, "video-timing-offset", "0");
+'@
+$NewDxgiTimingOffset = @'
+    mpv_set_option_string(handle_, "video-sync", "audio");
+    // PiliPlus4WOA: use mpv's default 50ms (0.05) presentation lookahead
+    // headroom instead of 0 to avoid micro-stutters right on the VSync deadline.
+    mpv_set_option_string(handle_, "video-timing-offset", "0.05");
+'@
+
+$OldDxgiProducerSignal = @'
+void MailboxSwapChain::ProducerCommit() {
+  auto& ws = slots_[write_slot_];
+  context4_->Signal(ws.fence.Get(), ++ws.fence_value);
+'@
+$NewDxgiProducerSignal = @'
+void MailboxSwapChain::ProducerCommit() {
+  auto& ws = slots_[write_slot_];
+  context4_->Signal(ws.fence.Get(), ++ws.fence_value);
+  // PiliPlus4WOA: immediately flush the Signal command so the Qualcomm Adreno
+  // GPU driver does not buffer it indefinitely in CPU driver memory.
+  context4_->Flush();
+'@
+
+$OldDxgiConsumerAcquire = @'
+HANDLE MailboxSwapChain::ConsumerAcquire() {
+  // Always return the most recently fence-confirmed frame.
+  // Advancement is handled exclusively by ProducerCommit (called one full
+  // render-cycle after each Signal, where fence completion is far more
+  // likely).
+  return slots_[latest_completed_slot_.load(std::memory_order_acquire)]
+      .shared_handle;
+}
+'@
+$NewDxgiConsumerAcquire = @'
+HANDLE MailboxSwapChain::ConsumerAcquire() {
+  // PiliPlus4WOA: non-blockingly check if the pending frame has already completed.
+  // When mpv signals a frame and calls MarkTextureFrameAvailable, Flutter's
+  // raster callback arrives several milliseconds later -- by which time the GPU
+  // has almost always finished rendering. Promoting here eliminates 1-2 frames
+  // of presentation latency and avoids dropping frames if ProducerCommit runs late.
+  uint32_t snap = mailbox_state_.load(std::memory_order_acquire);
+  if (snap & (1u << 6)) {  // has_pending
+    const int pend = static_cast<int>((snap >> 4) & 0x3u);
+    const int comp = static_cast<int>((snap >> 2) & 0x3u);
+    const int fr   = static_cast<int>(snap & 0x3u);
+    if (slots_[pend].fence->GetCompletedValue() >= slots_[pend].fence_value) {
+      const uint32_t snap_desired =
+          (static_cast<uint32_t>(comp) << 4) |
+          (static_cast<uint32_t>(pend) << 2) |
+          static_cast<uint32_t>(fr);
+      if (mailbox_state_.compare_exchange_strong(
+              snap, snap_desired,
+              std::memory_order_acq_rel,
+              std::memory_order_relaxed)) {
+        latest_completed_slot_.store(pend, std::memory_order_release);
+      }
+    }
+  }
+  return slots_[latest_completed_slot_.load(std::memory_order_acquire)]
+      .shared_handle;
+}
+'@
+
 $edits = @(
     @{ file = $utilsPath; old = $OldFullscreenRect; new = $NewFullscreenRect;                label = "utils.cc: EnterNativeFullscreen must use GetWindowRect (26H2 taskbar-height shift)" }
 )
@@ -902,7 +971,10 @@ if ($useAngle) {
     )
 } else {
     $edits += @(
-        @{ file = $videoPath; old = $OldDxgiSetSize; new = $NewDxgiSetSize; label = "video_output.cc: proportional software dimensions on explicit resize" }
+        @{ file = $videoPath; old = $OldDxgiSetSize; new = $NewDxgiSetSize; label = "video_output.cc: proportional software dimensions on explicit resize" },
+        @{ file = $videoPath; old = $OldDxgiTimingOffset; new = $NewDxgiTimingOffset; label = "video_output.cc: video-timing-offset 0.05" },
+        @{ file = $mailboxPath; old = $OldDxgiProducerSignal; new = $NewDxgiProducerSignal; label = "mailbox_swap_chain.cc: ProducerCommit flush" },
+        @{ file = $mailboxPath; old = $OldDxgiConsumerAcquire; new = $NewDxgiConsumerAcquire; label = "mailbox_swap_chain.cc: ConsumerAcquire promote pending if completed" }
     )
 }
 
@@ -912,6 +984,7 @@ if ($useAngle) {
 $states = @{}
 $filesToPatch = @($videoPath, $videoHeaderPath, $utilsPath)
 if ($useAngle) { $filesToPatch += @($headerPath, $anglePath) }
+if ($useDxgi) { $filesToPatch += @($mailboxPath) }
 foreach ($p in $filesToPatch) {
     $states[$p] = Get-Normalized $p
 }
