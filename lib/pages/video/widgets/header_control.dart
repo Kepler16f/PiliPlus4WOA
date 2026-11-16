@@ -1029,9 +1029,7 @@ class HeaderControlState extends State<HeaderControl>
                           return;
                         }
                         Get.back();
-                        // ARM64 修改版：本 fork 的 BaseItem.id 仍是 int?（上游
-                        // C 组把 id 改成了非空 late int），这里用 ! 断言。
-                        final int quality = item.id!;
+                        final int quality = item.id;
                         final newQa = AudioQuality.fromCode(quality);
                         videoDetailCtr
                           ..plPlayerController.cacheAudioQa = newQa.code
