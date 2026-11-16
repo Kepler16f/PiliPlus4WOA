@@ -17,7 +17,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
 # update when release
-version: 2.2.0+1
+version: 2.2.1+1
 
 environment:
   sdk: ">=3.13.0"
@@ -79,7 +79,7 @@ dependencies:
   device_info_plus: ^13.1.0
   dio: ^5.9.1
   dio_http2_adapter: ^2.7.1
-  dlna_dart: ^0.1.0
+  dlna_dart: ^0.1.2
   dynamic_color: ^2.1.0
   easy_debounce: ^2.0.3
   encrypt: ^5.0.3
@@ -119,7 +119,7 @@ dependencies:
   hive_ce: ^2.19.3
   html: ^0.15.4
   http2: ^2.3.1
-  image_cropper: ^12.0.0
+  image_cropper: ^13.0.0
   image_picker: ^1.1.2
   intl: ^0.20.2
   jni: ^1.0.0
@@ -148,7 +148,7 @@ dependencies:
   path_provider_platform_interface: ^2.1.3
   permission_handler_android: ^14.0.0
   permission_handler_apple: ^9.4.7
-  permission_handler_platform_interface: ^4.3.0
+  permission_handler_platform_interface: ^4.4.0
   pretty_qr_code: ^3.3.0
   protobuf: ^6.0.0
   re_highlight: ^0.0.3

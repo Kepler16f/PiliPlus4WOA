@@ -1937,16 +1937,10 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   }
 
   void onSeekEnd() {
-<<<<<<< HEAD
     if (seekToPos != null) {
       feedBack();
     }
-    if (showSeekPreview) {
-      showPreview.value = false;
-    }
-=======
     hidePreviewIfNeeded();
->>>>>>> dc829bf26 (fix #3522)
     hasToasted = false;
     isSeeking.value = false;
     _updatePlaybackState();
