@@ -72,10 +72,7 @@ class ArticlePage extends StatefulWidget {
 class _ArticlePageState extends CommonDynPageState<ArticlePage>
     with DynReplyLocateStateMixin {
   @override
-  final ArticleController controller = Get.putOrFind(
-    ArticleController.new,
-    tag: Get.parameters['type']! + Get.parameters['id']!,
-  );
+  late final ArticleController controller;
 
   @override
   dynamic get arguments => {
@@ -87,20 +84,15 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage>
 
   @override
   void initState() {
-<<<<<<< HEAD
-    super.initState();
-    if (Get.parameters.containsKey('viewComment') ||
-        controller.rootRpId != null) {
-=======
     final args = Get.arguments;
     controller = Get.putOrFind(
       ArticleController.new,
       tag: (args['type']! as ArticleType).name + args['id']!,
     );
     if (args.containsKey('viewComment') || controller.rootRpId != null) {
->>>>>>> 24f798d0d (handle dyn foldAction)
       _centerKey = UniqueKey();
     }
+    super.initState();
   }
 
   @override
