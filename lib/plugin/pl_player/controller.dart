@@ -36,6 +36,7 @@ import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/asset_utils.dart';
+import 'package:PiliPlus/utils/desktop/memory_pressure_monitor.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
@@ -1062,13 +1063,14 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       }
     }
 
+    final pressure = MemoryPressureMonitor.instance.level;
     final Map<String, String> extras = {
       if (dataSource is FileSource)
         'cache': 'no'
       else if (isLive)
-        ...liveBuffer
+        ..._applyBufferCaps(liveBuffer, pressure)
       else
-        ...buffer,
+        ..._applyBufferCaps(buffer, pressure),
       // 桌面端旋转画面（上游 9378093b0）：直接交给 mpv 的 video-rotate。
       if (rotate != null) 'video-rotate': rotate.toString(),
       // ARM64 修改版设计决策（2026-09）：禁用 ffmpeg 层断点续传自愈。
@@ -1574,6 +1576,9 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
 
   void _startListeners(NativePlayer player) {
     assert(_subscriptions == null);
+    MemoryPressureMonitor.instance.listenable
+      ..removeListener(_onMemoryPressureChanged)
+      ..addListener(_onMemoryPressureChanged);
     final stream = player.stream;
     // mpv 日志转存到 crash log 的条数上限（每个播放器实例）。
     var mpvLogCount = 0;
@@ -1788,9 +1793,70 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
 
   /// 移除事件监听
   void _removeListeners() {
+    MemoryPressureMonitor.instance.listenable.removeListener(
+      _onMemoryPressureChanged,
+    );
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();
     _subscriptions = null;
+  }
+
+  ({int maxBytes, int maxBackBytes})? _resolveCappedDemuxerBuffer(
+    Map<String, String> baseBuffer,
+    MemoryPressureLevel pressure,
+  ) {
+    final maxBytes = int.tryParse(baseBuffer['demuxer-max-bytes'] ?? '');
+    final maxBackBytes = int.tryParse(
+      baseBuffer['demuxer-max-back-bytes'] ?? '',
+    );
+    if (maxBytes == null || maxBackBytes == null) {
+      return null;
+    }
+    return MemoryPressureMonitor.capDemuxerBuffer(
+      configuredMaxBytes: maxBytes,
+      configuredMaxBackBytes: maxBackBytes,
+      pressure: pressure,
+    );
+  }
+
+  Map<String, String> _applyBufferCaps(
+    Map<String, String> baseBuffer,
+    MemoryPressureLevel pressure,
+  ) {
+    if (pressure == MemoryPressureLevel.normal) {
+      return baseBuffer;
+    }
+    final capped = _resolveCappedDemuxerBuffer(baseBuffer, pressure);
+    if (capped == null) {
+      return baseBuffer;
+    }
+    return {
+      ...baseBuffer,
+      'demuxer-max-bytes': capped.maxBytes.toString(),
+      'demuxer-max-back-bytes': capped.maxBackBytes.toString(),
+    };
+  }
+
+  void _onMemoryPressureChanged() {
+    final level = MemoryPressureMonitor.instance.level;
+    if (level != MemoryPressureLevel.normal) {
+      trimPreviewBitmaps();
+    }
+    final player = _videoPlayerController;
+    if (player is! NativePlayer || _playerCount == 0) return;
+    if (dataSource is FileSource) return;
+
+    final baseBuffer = isLive ? liveBuffer : buffer;
+    final capped = _resolveCappedDemuxerBuffer(baseBuffer, level);
+    if (capped == null) return;
+
+    try {
+      player
+        ..setProperty('demuxer-max-bytes', capped.maxBytes.toString())
+        ..setProperty('demuxer-max-back-bytes', capped.maxBackBytes.toString());
+    } catch (_) {
+      // 播放器已释放等情况忽略
+    }
   }
 
   void _cancelSubForSeek() {
@@ -2380,6 +2446,10 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     _timer?.cancel();
     _displayBoxDebounce?.cancel();
     _displayBoxDebounce = null;
+    _decodeStateTimer?.cancel();
+    _decodeStateTimer = null;
+    volumeTimer?.cancel();
+    volumeTimer = null;
     _stopWakeLockTimer();
     // 自愈重开收尾定时器与进行中旗标一并清掉（对抗验证补充）：
     // dispose 本身不等待 _reloadAtCurrentPosition 的 finally，若恰好在这里
@@ -2463,14 +2533,26 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     }
   }
 
-  void _clearPreview() {
-    showPreview.value = false;
-    previewIndex.value = null;
-    videoShot = null;
+  void _disposePreviewBitmaps() {
+    if (previewCache.isEmpty) return;
     for (final i in previewCache.values) {
       i?.dispose();
     }
     previewCache.clear();
+  }
+
+  /// 仅释放当前未展示的预览雪碧图 GPU 位图缓存，保留 [videoShot] 元数据，
+  /// 避免重新发起网络请求的同时归还纹理内存。
+  void trimPreviewBitmaps() {
+    if (showPreview.value) return;
+    _disposePreviewBitmaps();
+  }
+
+  void _clearPreview() {
+    showPreview.value = false;
+    previewIndex.value = null;
+    videoShot = null;
+    _disposePreviewBitmaps();
   }
 
   Future<void> getVideoShot() async {

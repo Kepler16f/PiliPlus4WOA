@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
+import 'package:PiliPlus/utils/desktop/memory_pressure_monitor.dart';
 import 'package:PiliPlus/utils/desktop/tray_controller.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
@@ -38,7 +39,9 @@ class WindowController {
 
   Timer? _moveTimer;
   Timer? _resizeTimer;
+  Timer? _bgTrimTimer;
   static const _kDuration = Duration(milliseconds: 200);
+  static const _kBgTrimDelay = Duration(milliseconds: 300);
 
   late bool minimizeOnExit = Pref.minimizeOnExit;
   late bool pauseOnMinimize = Pref.pauseOnMinimize;
@@ -74,11 +77,13 @@ class WindowController {
         break;
       case WindowMinimizedEvent():
         _pauseIfNeeded();
+        _scheduleBackgroundTrim();
         break;
       case WindowMaximizedEvent():
         windowMaximizedPref = _isMaximized = true;
         break;
       case WindowRestoredEvent():
+        _bgTrimTimer?.cancel();
         if (_isMaximized) {
           windowMaximizedPref = _isMaximized = false;
         }
@@ -174,7 +179,32 @@ class WindowController {
     }
   }
 
+  void _scheduleBackgroundTrim() {
+    _bgTrimTimer?.cancel();
+    final player = PlPlayerController.instance;
+    if (player != null &&
+        player.playerStatus.isPlaying &&
+        !_pausedForBackground) {
+      return;
+    }
+    _bgTrimTimer = Timer(_kBgTrimDelay, () {
+      final window = _window;
+      if (window == null) return;
+      if (!window.isMinimized && window.isVisible) return;
+      final currentPlayer = PlPlayerController.instance;
+      if (currentPlayer != null &&
+          currentPlayer.playerStatus.isPlaying &&
+          !_pausedForBackground) {
+        return;
+      }
+      currentPlayer?.trimPreviewBitmaps();
+      MemoryPressureMonitor.instance.trimBackgroundMemory();
+    });
+  }
+
   Future<void> onClose() async {
+    _bgTrimTimer?.cancel();
+    MemoryPressureMonitor.instance.dispose();
     await GStorage.compact();
     await GStorage.close();
     TrayController.instance.dispose();
@@ -193,6 +223,7 @@ class WindowController {
     // https://github.com/leanflutter/window_manager/issues/571
     _setOpacityOnWindows(0.0);
     _window?.hide();
+    _scheduleBackgroundTrim();
   }
 
   /// 显示窗口。
@@ -203,6 +234,7 @@ class WindowController {
   /// 判断 showCmd != SW_NORMAL 就发 SC_RESTORE，会误伤**最大化**的窗口（把
   /// 用户拉成普通大小），所以仅在确实处于最小化时才还原。
   void show() {
+    _bgTrimTimer?.cancel();
     final window = _window;
     if (window == null) return;
     if (window.isMinimized) {
@@ -228,6 +260,8 @@ class WindowController {
   void dispose() {
     _moveTimer?.cancel();
     _resizeTimer?.cancel();
+    _bgTrimTimer?.cancel();
+    _bgTrimTimer = null;
     final id = _windowId;
     if (id != null) {
       _window?.removeListener(id);

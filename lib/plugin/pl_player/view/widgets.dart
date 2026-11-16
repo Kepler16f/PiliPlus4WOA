@@ -261,6 +261,8 @@ class _VideoShotImageState extends State<VideoShotImage> {
     );
   }
 
+  static const int _kMaxPreviewCacheEntries = 4;
+
   void _loadImg() {
     final url = widget.url;
     _image = widget.imageCache[url];
@@ -272,16 +274,35 @@ class _VideoShotImageState extends State<VideoShotImage> {
         if (image != null) {
           if (widget.isMounted()) {
             widget.imageCache[url] = image;
-          }
-          if (mounted) {
-            _image = image;
-            _initSizeIfNeeded();
-            setState(() {});
+            _prunePreviewCache(widget.url);
+            if (mounted && widget.url == url) {
+              _image = image;
+              _initSizeIfNeeded();
+              setState(() {});
+            }
+          } else {
+            widget.imageCache.remove(url);
+            image.dispose();
           }
         } else {
           widget.imageCache.remove(url);
         }
       });
+    }
+  }
+
+  void _prunePreviewCache(String activeUrl) {
+    if (widget.imageCache.length <= _kMaxPreviewCacheEntries) return;
+    final staleKeys = <String>[];
+    var excess = widget.imageCache.length - _kMaxPreviewCacheEntries;
+    for (final key in widget.imageCache.keys) {
+      if (excess <= 0) break;
+      if (key == activeUrl) continue;
+      staleKeys.add(key);
+      excess--;
+    }
+    for (final key in staleKeys) {
+      widget.imageCache.remove(key)?.dispose();
     }
   }
 
