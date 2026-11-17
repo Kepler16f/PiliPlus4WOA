@@ -24,6 +24,7 @@ class _DLNAPageState extends State<DLNAPage> {
 
   Timer? _timer;
   bool _isSearching = false;
+  String? _searchError;
   DLNADevice? _lastDevice;
   String? _lastDeviceKey;
 
@@ -36,26 +37,35 @@ class _DLNAPageState extends State<DLNAPage> {
   Future<void> _onSearch({bool isInit = false}) async {
     if (_isSearching) return;
     _isSearching = true;
+    _searchError = null;
     if (!isInit && mounted) {
       _lastDevice = null;
       _deviceList.clear();
       setState(() {});
     }
-    final deviceManager = await _searcher.start();
-    if (!mounted) {
-      return;
-    }
-    _timer = Timer(const Duration(seconds: 20), _searcher.stop);
-    await for (final deviceList in deviceManager.devices.stream) {
-      if (mounted) {
-        _deviceList.addAll(deviceList);
-        setState(() {});
+    try {
+      final deviceManager = await _searcher.start();
+      if (!mounted) {
+        return;
       }
-    }
-    if (mounted) {
-      setState(() {
-        _isSearching = false;
-      });
+      _timer = Timer(const Duration(seconds: 20), _searcher.stop);
+      await for (final deviceList in deviceManager.devices.stream) {
+        if (mounted) {
+          _deviceList.addAll(deviceList);
+          setState(() {});
+        }
+      }
+    } catch (_) {
+      _searchError = '搜索设备失败，请检查网络后重试';
+    } finally {
+      _timer?.cancel();
+      _timer = null;
+      _searcher.stop();
+      if (mounted) {
+        setState(() {
+          _isSearching = false;
+        });
+      }
     }
   }
 
@@ -96,7 +106,7 @@ class _DLNAPageState extends State<DLNAPage> {
   Widget _buildBody(ColorScheme colorScheme) {
     if (!_isSearching && _deviceList.isEmpty) {
       return HttpError(
-        errMsg: '没有设备',
+        errMsg: _searchError ?? '没有设备',
         onReload: _onSearch,
       );
     }

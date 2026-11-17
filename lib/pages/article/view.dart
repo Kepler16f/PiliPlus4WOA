@@ -149,6 +149,7 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage>
       );
     }
 
+    _centerKey = null;
     padding = padding / 4;
     final flex = controller.ratio[0].toInt();
     final flex1 = controller.ratio[1].toInt();
@@ -159,6 +160,7 @@ class _ArticlePageState extends CommonDynPageState<ArticlePage>
           flex: flex,
           child: SelectionArea(
             child: CustomScrollView(
+              primary: true,
               physics: const AlwaysScrollableScrollPhysics(),
               slivers: [
                 SliverPadding(

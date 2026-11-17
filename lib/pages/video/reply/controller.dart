@@ -2,7 +2,6 @@ import 'package:PiliPlus/grpc/bilibili/main/community/reply/v1.pb.dart'
     show MainListReply, ReplyInfo;
 import 'package:PiliPlus/grpc/reply.dart';
 import 'package:PiliPlus/http/loading_state.dart';
-import 'package:PiliPlus/models_new/dynamic/dyn_mention/item.dart';
 import 'package:PiliPlus/pages/common/reply/fold/reply_fold_mixin.dart';
 import 'package:PiliPlus/pages/common/reply/reply_controller.dart';
 import 'package:PiliPlus/pages/common/reply/vote/reply_vote_mixin.dart';
@@ -11,7 +10,6 @@ import 'package:PiliPlus/pages/video/controller.dart';
 import 'package:PiliPlus/pages/video/reply_reply/view.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/reply_scheme_helper.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/widgets.dart' show BoxConstraints, WidgetsBinding;
 
 import 'package:get/get.dart';

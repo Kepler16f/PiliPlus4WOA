@@ -36,7 +36,7 @@ class MainController extends GetxController
   RxBool? showBottomBar;
   late final bool hideBottomBar;
   late final barHideType = Pref.barHideType;
-  bool useBottomNav = true;
+  late bool useBottomNav = !useSideBar;
   late dynamic controller;
   final RxInt selectedIndex = 0.obs;
 

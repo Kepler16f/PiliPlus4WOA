@@ -36,6 +36,8 @@ import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/asset_utils.dart';
+import 'package:PiliPlus/utils/desktop/calc_window_position.dart'
+    show calcWindowBounds;
 import 'package:PiliPlus/utils/desktop/memory_pressure_monitor.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
@@ -315,7 +317,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
         window.titleBarStyle = nativeapi.TitleBarStyle.normal;
       }
       window
-        ..minimumSize = const nativeapi.Size(width: 400, height: 700)
+        ..minimumSize = calcWindowBounds().$1
         ..aspectRatio = 0;
       if (bounds != null) {
         window.bounds = bounds;

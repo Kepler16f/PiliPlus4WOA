@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:PiliPlus/common/widgets/slotted_layout_helper.dart';
 import 'package:flutter/rendering.dart' show ChildLayoutHelper;
 import 'package:material_ui/material_ui.dart';
@@ -64,7 +66,7 @@ class _RenderMainLayout extends RenderBox
 
       bodyOffset = Offset(sideBarWidth, 0);
       bodyConstraints = BoxConstraints.tightFor(
-        width: constraints.maxWidth - sideBarWidth,
+        width: math.max(0.0, constraints.maxWidth - sideBarWidth),
         height: constraints.maxHeight,
       );
     } else {
