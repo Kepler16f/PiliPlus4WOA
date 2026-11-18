@@ -42,10 +42,10 @@ bool FlutterWindow::OnCreate() {
   window_sync_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-        if (call.method() == "beginResizeBatch") {
+        if (call.method_name() == "beginResizeBatch") {
           SetDeferChildResize(true);
           result->Success();
-        } else if (call.method() == "endResizeBatch") {
+        } else if (call.method_name() == "endResizeBatch") {
           SetDeferChildResize(false);
           result->Success();
         } else {

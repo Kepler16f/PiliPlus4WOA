@@ -195,7 +195,7 @@ void SmtcController::Dispose() {
 void SmtcController::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  const std::string& method = call.method();
+  const std::string& method = call.method_name();
   if (method == "setMediaItem") {
     if (call.arguments() && std::holds_alternative<flutter::EncodableMap>(*call.arguments())) {
       UpdateMediaItem(std::get<flutter::EncodableMap>(*call.arguments()));
