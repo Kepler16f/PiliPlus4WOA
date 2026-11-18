@@ -56,3 +56,58 @@ Rect calcWindowBounds({
   );
   return Rect.fromLTWH(offset.dx, offset.dy, size.width, size.height);
 }
+
+/// 计算桌面画中画（PiP）的初始/恢复边界。
+///
+/// [savedPipBounds] 上次保存的 PiP 窗口边界。如果存在且合法（尺寸未异常超标且仍在屏幕范围内），
+/// 则沿用该尺寸与位置（按视频 [aspectRatio] 适配对应边长）；若不存在或异常超大（如曾被误存为主窗口尺寸），
+/// 则回退到 [targetSize] 并居右下角摆放。
+///
+/// 所有尺寸均收敛在 [minSize] 与 [workArea] 之间，且位置被强制限定在工作区边界内（保留安全边距）。
+Rect calcPipBounds({
+  required Size targetSize,
+  required Size minSize,
+  required double aspectRatio,
+  required Rect workArea,
+  Rect? savedPipBounds,
+}) {
+  final double width, height;
+  if (savedPipBounds != null &&
+      savedPipBounds.width >= minSize.width &&
+      savedPipBounds.height >= minSize.height &&
+      savedPipBounds.width <= 700.0 &&
+      savedPipBounds.width <= workArea.width * 0.55 &&
+      savedPipBounds.height <= workArea.height * 0.55) {
+    // 具有合法的上次记忆尺寸：根据当前视频的横纵比调整高度
+    final candidateWidth = math.min(savedPipBounds.width, workArea.width);
+    final candidateHeight = candidateWidth / aspectRatio;
+    if (candidateHeight <= workArea.height) {
+      width = math.max(candidateWidth, minSize.width);
+      height = math.max(candidateHeight, minSize.height);
+    } else {
+      height = math.min(savedPipBounds.height, workArea.height);
+      width = math.max(height * aspectRatio, minSize.width);
+    }
+  } else {
+    // 默认初始尺寸，受工作区与最小尺寸约束
+    width = math.max(math.min(targetSize.width, workArea.width), minSize.width);
+    height = math.max(math.min(targetSize.height, workArea.height), minSize.height);
+  }
+
+  // 坐标计算：优先保留 savedPipBounds 的位置，若未保存或已不在工作区内，则置于工作区右下角
+  const double margin = 24.0;
+  final double x, y;
+  if (savedPipBounds != null &&
+      savedPipBounds.left >= workArea.left - margin &&
+      savedPipBounds.top >= workArea.top - margin &&
+      savedPipBounds.right <= workArea.right + margin &&
+      savedPipBounds.bottom <= workArea.bottom + margin) {
+    x = savedPipBounds.left.clamp(workArea.left, math.max(workArea.left, workArea.right - width));
+    y = savedPipBounds.top.clamp(workArea.top, math.max(workArea.top, workArea.bottom - height));
+  } else {
+    x = math.max(workArea.left, workArea.right - width - margin);
+    y = math.max(workArea.top, workArea.bottom - height - margin);
+  }
+
+  return Rect.fromLTWH(x, y, width, height);
+}

@@ -449,6 +449,7 @@ class AudioController extends GetxController
           animController.reverse();
           _playerStatus = .paused;
           _startStatusTimer();
+          _updatePlaybackState();
         }
       }),
       stream.buffering.listen((bool buffering) {

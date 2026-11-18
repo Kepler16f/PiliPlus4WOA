@@ -92,4 +92,68 @@ void main() {
       expect(bounds.topLeft, Offset.zero);
     });
   });
+
+  group('calcPipBounds', () {
+    const workArea = Rect.fromLTWH(0, 0, 1920, 1080);
+    const targetSize = Size(497.7, 280.0);
+    const minSize = Size(284.4, 160.0);
+    const aspectRatio = 16 / 9;
+
+    test('uses default target size placed at bottom-right when no saved bounds', () {
+      final bounds = calcPipBounds(
+        targetSize: targetSize,
+        minSize: minSize,
+        aspectRatio: aspectRatio,
+        workArea: workArea,
+      );
+      expect(bounds.width, closeTo(497.7, 0.1));
+      expect(bounds.height, closeTo(280.0, 0.1));
+      expect(bounds.right, closeTo(1920 - 24.0, 0.1));
+      expect(bounds.bottom, closeTo(1080 - 24.0, 0.1));
+    });
+
+    test('rejects corrupted/oversized saved bounds and falls back to targetSize', () {
+      // 模拟误存主窗口尺寸（1093.5 x 720）时的场景
+      const corruptedSaved = Rect.fromLTWH(100, 100, 1093.5, 720.0);
+      final bounds = calcPipBounds(
+        targetSize: targetSize,
+        minSize: minSize,
+        aspectRatio: aspectRatio,
+        workArea: workArea,
+        savedPipBounds: corruptedSaved,
+      );
+      expect(bounds.width, closeTo(497.7, 0.1));
+      expect(bounds.height, closeTo(280.0, 0.1));
+    });
+
+    test('preserves valid saved size and adapts aspect ratio', () {
+      const validSaved = Rect.fromLTWH(500, 300, 400.0, 225.0);
+      final bounds = calcPipBounds(
+        targetSize: targetSize,
+        minSize: minSize,
+        aspectRatio: aspectRatio,
+        workArea: workArea,
+        savedPipBounds: validSaved,
+      );
+      expect(bounds.width, closeTo(400.0, 0.1));
+      expect(bounds.height, closeTo(400.0 / aspectRatio, 0.1));
+      expect(bounds.left, 500.0);
+      expect(bounds.top, 300.0);
+    });
+
+    test('clamps position inside work area when saved position is out of bounds', () {
+      const outOfBoundsSaved = Rect.fromLTWH(1800, 1000, 400.0, 225.0);
+      final bounds = calcPipBounds(
+        targetSize: targetSize,
+        minSize: minSize,
+        aspectRatio: aspectRatio,
+        workArea: workArea,
+        savedPipBounds: outOfBoundsSaved,
+      );
+      expect(bounds.right, lessThanOrEqualTo(1920.0));
+      expect(bounds.bottom, lessThanOrEqualTo(1080.0));
+      expect(bounds.left, greaterThanOrEqualTo(0.0));
+      expect(bounds.top, greaterThanOrEqualTo(0.0));
+    });
+  });
 }

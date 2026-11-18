@@ -37,7 +37,9 @@ import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/asset_utils.dart';
 import 'package:PiliPlus/utils/desktop/calc_window_position.dart'
-    show calcWindowBounds;
+    show calcWindowBounds, currentWorkArea;
+import 'package:PiliPlus/utils/desktop/window_bounds.dart'
+    show calcPipBounds;
 import 'package:PiliPlus/utils/desktop/memory_pressure_monitor.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/device_utils.dart';
@@ -231,6 +233,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       (PlatformUtils.isDesktop && isDesktopPip);
   late bool isDesktopPip = false;
   bool _pipTransitioning = false;
+  bool _wasMaximizedBeforePip = false;
   Timer? _displayBoxDebounce;
   nativeapi.Rectangle? _lastWindowBounds;
   // 上游 2.1.6（#2997 画中画窗口记忆）：跨进入/退出记忆 PiP 窗口的位置与尺寸，
@@ -285,7 +288,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   }
 
   bool updatePipBounds(nativeapi.Window window) {
-    if (isDesktopPip) {
+    if (isDesktopPip && !_pipTransitioning) {
       _lastPipBounds = window.bounds;
       return true;
     }
@@ -304,15 +307,18 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   Future<void> exitDesktopPip() async {
     final window = WindowController.instance.window;
     if (window == null) return;
+    if (!isDesktopPip || _pipTransitioning) return;
     final bounds = _lastWindowBounds;
     // 诊断：确认按钮点击是否真的走到了这里、以及窗口恢复参数是否有效。
     // （用户报过「退出画中画按钮点击没反应」——若日志无此行，问题在点击层面；
     //   有此行但窗口没恢复，问题在这个函数里。）
     Utils.reportError('pip: exitDesktopPip bounds=$bounds', null);
-    isDesktopPip = false;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
+    await WindowController.instance.beginTransition();
     try {
+      isDesktopPip = false;
+      setAlwaysOnTop(false, window: window);
       if (showWindowTitleBar) {
         window.titleBarStyle = nativeapi.TitleBarStyle.normal;
       }
@@ -322,12 +328,16 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       if (bounds != null) {
         window.bounds = bounds;
       }
-      setAlwaysOnTop(false, window: window);
+      if (_wasMaximizedBeforePip) {
+        _wasMaximizedBeforePip = false;
+        window.maximize();
+      }
       Utils.reportError('pip: exitDesktopPip done', null);
     } catch (e) {
       Utils.reportError('pip: exitDesktopPip failed: $e', null);
     } finally {
       _pipTransitioning = false;
+      await WindowController.instance.endTransition();
       unawaited(_applyVideoOutputSize());
     }
   }
@@ -335,19 +345,19 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   Future<void> enterDesktopPip() async {
     final window = WindowController.instance.window;
     if (window == null) return;
-    if (isFullScreen.value) return;
+    if (isFullScreen.value || isDesktopPip || _pipTransitioning) return;
 
     Utils.reportError('pip: enterDesktopPip', null);
-    isDesktopPip = true;
     _pipTransitioning = true;
     _displayBoxDebounce?.cancel();
+    await WindowController.instance.beginTransition();
 
     try {
-      _lastWindowBounds = window.bounds;
-
-      if (showWindowTitleBar) {
-        window.titleBarStyle = nativeapi.TitleBarStyle.hidden;
+      _wasMaximizedBeforePip = window.isMaximized;
+      if (_wasMaximizedBeforePip) {
+        window.unmaximize();
       }
+      _lastWindowBounds = window.bounds;
 
       const shortSide = 280.0;
       const minShortSide = 160.0;
@@ -385,15 +395,38 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
 
       window.minimumSize = minimumSize;
       setAlwaysOnTop(true, window: window);
-      final pipBounds = _lastPipBounds;
-      if (pipBounds != null) {
-        window.bounds = _adjustPipBounds(pipBounds, size, aspectRatio);
-      } else {
-        window.contentSize = size;
+
+      final workArea = currentWorkArea ?? const Rect.fromLTWH(0, 0, 1920, 1080);
+      final lastPip = _lastPipBounds;
+      final pipRect = calcPipBounds(
+        targetSize: Size(size.width, size.height),
+        minSize: Size(minimumSize.width, minimumSize.height),
+        aspectRatio: aspectRatio,
+        workArea: workArea,
+        savedPipBounds: lastPip != null
+            ? Rect.fromLTWH(lastPip.x, lastPip.y, lastPip.width, lastPip.height)
+            : null,
+      );
+      _lastPipBounds = nativeapi.Rectangle(
+        x: pipRect.left,
+        y: pipRect.top,
+        width: pipRect.width,
+        height: pipRect.height,
+      );
+      window
+        ..bounds = _lastPipBounds!
+        ..aspectRatio = aspectRatio;
+
+      if (showWindowTitleBar) {
+        window.titleBarStyle = nativeapi.TitleBarStyle.hidden;
       }
-      window.aspectRatio = aspectRatio;
+
+      isDesktopPip = true;
+    } catch (e) {
+      Utils.reportError('pip: enterDesktopPip failed: $e', null);
     } finally {
       _pipTransitioning = false;
+      await WindowController.instance.endTransition();
       unawaited(_applyVideoOutputSize());
     }
   }
@@ -1628,6 +1661,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       stream.playing.listen((bool playing) {
         if (playing) {
           _stopWakeLockTimer();
+          playerStatus.value = .playing;
           _updatePlaybackState();
           WakelockPlus.enable();
           _reportDecodeState(player);
@@ -1642,11 +1676,11 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
               _disableAutoEnterPip();
             }
           }
-          playerStatus.value = .playing;
         } else {
           _startWakeLockTimer();
           _disableAutoEnterPip();
           playerStatus.value = .paused;
+          _updatePlaybackState();
         }
 
         for (final element in _statusListeners) {
@@ -1868,6 +1902,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
     danmakuController?.clear();
     try {
       await _videoPlayerController?.seek(position);
+      _updatePlaybackState(position: position);
     } catch (e) {
       if (kDebugMode) debugPrint('seek failed: $e');
     }

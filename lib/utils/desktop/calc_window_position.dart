@@ -64,6 +64,7 @@ const _displayManager = nativeapi.DisplayManager.instance;
 nativeapi.Size _toNativeSize(Size size) =>
     nativeapi.Size(width: size.width, height: size.height);
 
+Rect? get currentWorkArea => _currentWorkArea;
 Rect? get _currentWorkArea => _currentDisplay?.workArea.toRect();
 
 Offset? get _savedWindowPosition {

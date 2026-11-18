@@ -204,6 +204,10 @@ Win32Window::MessageHandler(HWND hwnd,
       return 0;
     }
     case WM_SIZE: {
+      if (defer_child_resize_) {
+        pending_child_resize_ = true;
+        return 0;
+      }
       RECT rect = GetClientArea();
       if (child_content_ != nullptr) {
         // Size and position the child window.
@@ -267,6 +271,18 @@ HWND Win32Window::GetHandle() {
 
 void Win32Window::SetQuitOnClose(bool quit_on_close) {
   quit_on_close_ = quit_on_close;
+}
+
+void Win32Window::SetDeferChildResize(bool defer) {
+  defer_child_resize_ = defer;
+  if (!defer && pending_child_resize_) {
+    pending_child_resize_ = false;
+    if (child_content_ != nullptr) {
+      RECT rect = GetClientArea();
+      MoveWindow(child_content_, rect.left, rect.top, rect.right - rect.left,
+                 rect.bottom - rect.top, TRUE);
+    }
+  }
 }
 
 bool Win32Window::OnCreate() {

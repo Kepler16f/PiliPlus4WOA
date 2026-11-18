@@ -1,6 +1,8 @@
 import 'dart:async' show Timer;
 import 'dart:io' show Platform;
 
+import 'package:flutter/services.dart' show MethodChannel;
+
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/utils/desktop/memory_pressure_monitor.dart';
@@ -42,6 +44,32 @@ class WindowController {
   Timer? _bgTrimTimer;
   static const _kDuration = Duration(milliseconds: 200);
   static const _kBgTrimDelay = Duration(milliseconds: 300);
+
+  static const _syncChannel = MethodChannel('piliplus/window_sync');
+  bool _isTransitioning = false;
+  bool get isTransitioning => _isTransitioning;
+
+  Future<void> beginTransition() async {
+    _isTransitioning = true;
+    _moveTimer?.cancel();
+    _resizeTimer?.cancel();
+    if (Platform.isWindows) {
+      try {
+        await _syncChannel.invokeMethod('beginResizeBatch');
+      } catch (_) {}
+    }
+  }
+
+  Future<void> endTransition() async {
+    _moveTimer?.cancel();
+    _resizeTimer?.cancel();
+    _isTransitioning = false;
+    if (Platform.isWindows) {
+      try {
+        await _syncChannel.invokeMethod('endResizeBatch');
+      } catch (_) {}
+    }
+  }
 
   late bool minimizeOnExit = Pref.minimizeOnExit;
   late bool pauseOnMinimize = Pref.pauseOnMinimize;
@@ -125,6 +153,7 @@ class WindowController {
   }
 
   void onWindowMoved() {
+    if (_isTransitioning) return;
     final window = _window;
     if (window == null) return;
     // PiP 时不改主窗口记忆，只把 PiP 窗口当前位置记下来（#2997 窗口记忆）。
@@ -136,6 +165,7 @@ class WindowController {
   }
 
   void onWindowResized() {
+    if (_isTransitioning) return;
     final window = _window;
     if (window == null) return;
     if (PlPlayerController.instance?.updatePipBounds(window) ?? false) {

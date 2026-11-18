@@ -34,6 +34,29 @@ bool FlutterWindow::OnCreate() {
   }
   SetChildContent(view_window);
 
+  // Set up window sync channel for atomic resize batches (e.g. PiP transition)
+  window_sync_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "piliplus/window_sync",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_sync_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method() == "beginResizeBatch") {
+          SetDeferChildResize(true);
+          result->Success();
+        } else if (call.method() == "endResizeBatch") {
+          SetDeferChildResize(false);
+          result->Success();
+        } else {
+          result->NotImplemented();
+        }
+      });
+
+  // Initialize SMTC controller
+  smtc_controller_.Initialize(GetHandle(),
+                              flutter_controller_->engine()->messenger());
+
   // flutter_controller_->engine()->SetNextFrameCallback([&]() {
   //   this->Show();
   // });
@@ -47,6 +70,12 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (window_sync_channel_) {
+    window_sync_channel_->SetMethodCallHandler(nullptr);
+    window_sync_channel_ = nullptr;
+  }
+  smtc_controller_.Dispose();
+
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -69,6 +98,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case piliplus::WM_APP_SMTC_EVENT:
+      smtc_controller_.ProcessQueuedEvents();
+      return 0;
+
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;

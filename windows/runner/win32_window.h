@@ -55,6 +55,9 @@ class Win32Window {
   // Return a RECT representing the bounds of the current client area.
   RECT GetClientArea();
 
+  // Defers resizing child_content_ during window resize batches (e.g. PiP transition)
+  void SetDeferChildResize(bool defer);
+
  protected:
   // Processes and route salient window messages for mouse handling,
   // size change and DPI. Delegates handling of these to member overloads that
@@ -97,6 +100,9 @@ class Win32Window {
 
   // window handle for hosted content.
   HWND child_content_ = nullptr;
+
+  bool defer_child_resize_ = false;
+  bool pending_child_resize_ = false;
 };
 
 #endif  // RUNNER_WIN32_WINDOW_H_

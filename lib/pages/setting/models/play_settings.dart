@@ -355,7 +355,7 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.autoPiP,
       defaultVal: false,
       onChanged: (val) {
-        if (val && !videoPlayerServiceHandler!.enableBackgroundPlay) {
+        if (val && !(videoPlayerServiceHandler?.enableBackgroundPlay ?? true)) {
           SmartDialog.showToast('建议开启后台音频服务');
         }
       },
@@ -403,16 +403,17 @@ List<SettingsModel> get playSettings => [
         .put(SettingBoxKey.btmProgressBehavior, value.index)
         .whenComplete(setState),
   ),
-  if (PlatformUtils.isMobile)
-    SwitchModel(
-      title: '后台音频服务',
-      subtitle: '避免画中画没有播放暂停功能',
-      leading: const Icon(Icons.volume_up_outlined),
-      setKey: SettingBoxKey.enableBackgroundPlay,
-      defaultVal: true,
-      onChanged: (value) =>
-          videoPlayerServiceHandler!.enableBackgroundPlay = value,
-    ),
+  SwitchModel(
+    title: Platform.isWindows ? 'Windows 控制中心与系统媒体控制' : '后台音频服务',
+    subtitle: Platform.isWindows
+        ? '接入 Windows 系统媒体控制中心（SMTC），支持锁屏/控制中心播放、暂停与进度控制'
+        : '避免画中画没有播放暂停功能',
+    leading: const Icon(Icons.volume_up_outlined),
+    setKey: SettingBoxKey.enableBackgroundPlay,
+    defaultVal: true,
+    onChanged: (value) =>
+        videoPlayerServiceHandler?.enableBackgroundPlay = value,
+  ),
   PopupModel(
     title: '播放顺序',
     leading: const Icon(Icons.repeat),
