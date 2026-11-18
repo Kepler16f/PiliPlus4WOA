@@ -164,9 +164,20 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       pgcIntroController = Get.put(PgcIntroController(), tag: heroTag);
     }
 
+    _bindMediaSkipHandlers();
     videoSourceInit();
 
     addObserverMobile(this);
+  }
+
+  void _bindMediaSkipHandlers() {
+    videoPlayerServiceHandler?.setSkipHandlers(
+      heroTag,
+      onSkipToPrevious: introController.prevPlay,
+      onSkipToNext: introController.nextPlay,
+      canSkipToPrevious: () => introController.canPrevPlay,
+      canSkipToNext: () => introController.canNextPlay,
+    );
   }
 
   // 获取视频资源，初始化播放器
@@ -421,6 +432,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       playOwner: (tag: heroTag, type: VideoDetailPageV),
     );
     PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
+    _bindMediaSkipHandlers();
 
     introController.startTimer();
 

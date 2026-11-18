@@ -5,7 +5,6 @@ import 'package:PiliPlus/pages/common/common_intro_controller.dart';
 import 'package:PiliPlus/pages/download/download/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
-import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/scroll_offset_helper.dart';
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
     show ExtendedNestedScrollController;
@@ -74,7 +73,7 @@ class LocalIntroController extends CommonIntroController {
     final currCid = videoDetailCtr.cid.value;
     final index = list.indexWhere((e) => e.cid == currCid);
     this.index.value = index;
-    if (PlatformUtils.isMobile) {
+    if (index != -1) {
       onVideoDetailChange(list[index]);
     }
     if (index != 0) {
@@ -115,6 +114,16 @@ class LocalIntroController extends CommonIntroController {
 
   final index = (-1).obs;
   final list = RxList<BiliDownloadEntryInfo>();
+
+  @override
+  bool get canPrevPlay => list.length > 1 && index.value > 0;
+
+  @override
+  bool get canNextPlay {
+    if (list.isEmpty || index.value < 0) return false;
+    if (index.value + 1 < list.length) return true;
+    return videoDetailCtr.plPlayerController.playRepeat == PlayRepeat.listCycle;
+  }
 
   @override
   bool nextPlay() {
@@ -166,9 +175,7 @@ class LocalIntroController extends CommonIntroController {
       ..value.title = entry.showTitle
       ..refresh();
     this.index.value = index;
-    if (PlatformUtils.isMobile) {
-      onVideoDetailChange(entry);
-    }
+    onVideoDetailChange(entry);
   }
 
   void onVideoDetailChange(BiliDownloadEntryInfo entry) {

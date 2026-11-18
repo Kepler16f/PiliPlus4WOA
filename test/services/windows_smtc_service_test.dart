@@ -1,7 +1,9 @@
+import 'dart:async';
+
+import 'package:PiliPlus/services/windows_smtc_service.dart';
 import 'package:audio_service_platform_interface/audio_service_platform_interface.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:PiliPlus/services/windows_smtc_service.dart';
 
 class _FakeAudioHandlerCallbacks implements AudioHandlerCallbacks {
   bool playCalled = false;
@@ -60,6 +62,10 @@ class _FakeAudioHandlerCallbacks implements AudioHandlerCallbacks {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  final pngBytes = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2]);
+  final jpegBytes = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 1, 2]);
+  final webpBytes = Uint8List.fromList([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+
   late WindowsSmtcAudioService service;
   final List<MethodCall> methodCalls = [];
 
@@ -73,7 +79,11 @@ void main() {
         return null;
       },
     );
-    service = WindowsSmtcAudioService();
+    service = WindowsSmtcAudioService(
+      httpFallbackDelay: Duration.zero,
+      thumbnailLoader: (artCacheFile, artUri) async => null,
+      thumbnailNormalizer: (raw) async => pngBytes,
+    );
   });
 
   tearDown(() {
@@ -84,7 +94,28 @@ void main() {
     );
   });
 
-  test('setMediaItem formats and invokes setMediaItem method', () async {
+  test('isJpegOrPng detects JPEG, PNG, and rejects WebP', () {
+    expect(WindowsSmtcAudioService.isJpegOrPng(pngBytes), isTrue);
+    expect(WindowsSmtcAudioService.isJpegOrPng(jpegBytes), isTrue);
+    expect(WindowsSmtcAudioService.isJpegOrPng(webpBytes), isFalse);
+    expect(WindowsSmtcAudioService.isJpegOrPng(Uint8List(0)), isFalse);
+  });
+
+  test('setMediaItem sends metadata and normalized thumbnailBytes and caches it', () async {
+    int loadCount = 0;
+    int normalizeCount = 0;
+    service = WindowsSmtcAudioService(
+      httpFallbackDelay: Duration.zero,
+      thumbnailLoader: (artCacheFile, artUri) async {
+        loadCount++;
+        return webpBytes;
+      },
+      thumbnailNormalizer: (raw) async {
+        normalizeCount++;
+        return pngBytes;
+      },
+    );
+
     await service.setMediaItem(
       SetMediaItemRequest(
         mediaItem: MediaItemMessage(
@@ -93,23 +124,87 @@ void main() {
           artist: 'Test UP',
           album: 'Test Album',
           duration: const Duration(seconds: 120),
-          extras: {'artCacheFile': r'C:\cache\art.jpg'},
+          artUri: Uri.parse('https://i0.hdslb.com/bfs/archive/test.jpg@1q.webp'),
+          extras: const {'artCacheFile': r'C:\cache\art.webp'},
         ),
       ),
     );
 
+    expect(loadCount, 1);
+    expect(normalizeCount, 1);
+    expect(methodCalls, hasLength(2));
+    expect(methodCalls.first.arguments['mediaId'], 'test_1');
+    expect(methodCalls.first.arguments['title'], 'Test Video');
+    expect(methodCalls.first.arguments['artist'], 'Test UP');
+    expect(methodCalls.first.arguments['album'], 'Test Album');
+    expect(methodCalls.first.arguments['durationMs'], 120000);
+    expect(methodCalls.first.arguments['thumbnailBytes'], isNull);
+
+    expect(methodCalls.last.arguments['mediaId'], 'test_1');
+    expect(methodCalls.last.arguments['thumbnailBytes'], equals(pngBytes));
+
+    // Second item with the same artUri hits in-memory cache immediately
+    methodCalls.clear();
+    await service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'test_2',
+          title: 'Part 2',
+          artist: 'Test UP',
+          artUri: Uri.parse('https://i0.hdslb.com/bfs/archive/test.jpg@1q.webp'),
+        ),
+      ),
+    );
+    expect(loadCount, 1);
     expect(methodCalls, hasLength(1));
-    final call = methodCalls.first;
-    expect(call.method, 'setMediaItem');
-    expect(call.arguments['title'], 'Test Video');
-    expect(call.arguments['artist'], 'Test UP');
-    expect(call.arguments['album'], 'Test Album');
-    expect(call.arguments['durationMs'], 120000);
-    expect(call.arguments['artCacheFile'], r'C:\cache\art.jpg');
-    expect(call.arguments['isLive'], false);
+    expect(methodCalls.first.arguments['thumbnailBytes'], equals(pngBytes));
   });
 
-  test('setState maps playback state and control capabilities', () async {
+  test('setMediaItem drops stale thumbnail when media switches mid-load', () async {
+    final completer = Completer<Uint8List?>();
+    service = WindowsSmtcAudioService(
+      httpFallbackDelay: Duration.zero,
+      thumbnailLoader: (artCacheFile, artUri) {
+        if (artUri?.toString().contains('first') ?? false) {
+          return completer.future;
+        }
+        return Future.value(jpegBytes);
+      },
+      thumbnailNormalizer: (raw) async => raw,
+    );
+
+    final firstCall = service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'first',
+          title: 'First Video',
+          artUri: Uri.parse('https://example.com/first.jpg'),
+        ),
+      ),
+    );
+
+    await service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'second',
+          title: 'Second Video',
+          artUri: Uri.parse('https://example.com/second.jpg'),
+        ),
+      ),
+    );
+
+    completer.complete(pngBytes);
+    await firstCall;
+
+    final secondThumbCalls = methodCalls.where(
+      (c) =>
+          c.arguments['mediaId'] == 'first' &&
+          c.arguments['thumbnailBytes'] != null,
+    );
+    expect(secondThumbCalls, isEmpty);
+  });
+
+  test('setState maps controls and systemActions skip/seek capabilities', () async {
     await service.setState(
       SetStateRequest(
         state: PlaybackStateMessage(
@@ -123,13 +218,12 @@ void main() {
               label: 'Pause',
               action: MediaActionMessage.pause,
             ),
-            MediaControlMessage(
-              androidIcon: 'ic_next',
-              label: 'Next',
-              action: MediaActionMessage.skipToNext,
-            ),
           ],
-          systemActions: const {MediaActionMessage.seek},
+          systemActions: const {
+            MediaActionMessage.seek,
+            MediaActionMessage.skipToPrevious,
+            MediaActionMessage.skipToNext,
+          },
         ),
       ),
     );
@@ -142,6 +236,7 @@ void main() {
     expect(call.arguments['speed'], 1.25);
     expect(call.arguments['canPlay'], false);
     expect(call.arguments['canPause'], true);
+    expect(call.arguments['canSkipToPrevious'], true);
     expect(call.arguments['canSkipToNext'], true);
     expect(call.arguments['canSeek'], true);
   });
@@ -152,24 +247,24 @@ void main() {
     expect(methodCalls.first.method, 'clear');
   });
 
-  test('handles native onButtonPressed and onSeekRequested callbacks', () async {
+  test('handles native onButtonPressed (including next/previous) and onSeekRequested', () async {
     final fakeCallbacks = _FakeAudioHandlerCallbacks();
     service.setHandlerCallbacks(fakeCallbacks);
 
-    // Simulate native platform calls
     final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const channel = MethodChannel('piliplus/windows_smtc');
 
-    final playCall = channel.codec.encodeMethodCall(const MethodCall('onButtonPressed', 'play'));
-    await messenger.handlePlatformMessage('piliplus/windows_smtc', playCall, (data) {});
+    for (final name in ['play', 'pause', 'next', 'previous']) {
+      final msg = channel.codec.encodeMethodCall(MethodCall('onButtonPressed', name));
+      await messenger.handlePlatformMessage('piliplus/windows_smtc', msg, (_) {});
+    }
     expect(fakeCallbacks.playCalled, isTrue);
-
-    final pauseCall = channel.codec.encodeMethodCall(const MethodCall('onButtonPressed', 'pause'));
-    await messenger.handlePlatformMessage('piliplus/windows_smtc', pauseCall, (data) {});
     expect(fakeCallbacks.pauseCalled, isTrue);
+    expect(fakeCallbacks.nextCalled, isTrue);
+    expect(fakeCallbacks.prevCalled, isTrue);
 
     final seekCall = channel.codec.encodeMethodCall(const MethodCall('onSeekRequested', 45000));
-    await messenger.handlePlatformMessage('piliplus/windows_smtc', seekCall, (data) {});
+    await messenger.handlePlatformMessage('piliplus/windows_smtc', seekCall, (_) {});
     expect(fakeCallbacks.seekPosition, const Duration(seconds: 45));
   });
 }

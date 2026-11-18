@@ -361,6 +361,27 @@ class PgcIntroController extends CommonIntroController {
     }
   }
 
+  bool _canMoveEpisode(int delta) {
+    final episodes = this.episodes;
+    if (episodes.isEmpty) return false;
+    final currentIndex = episodes.indexWhere(
+      (e) => e.cid == videoDetailCtr.cid.value,
+    );
+    if (currentIndex < 0) return false;
+    final targetIndex = currentIndex + delta;
+    if (targetIndex >= 0 && targetIndex < episodes.length) {
+      return true;
+    }
+    return episodes.length > 1 &&
+        videoDetailCtr.plPlayerController.playRepeat == PlayRepeat.listCycle;
+  }
+
+  @override
+  bool get canPrevPlay => _canMoveEpisode(-1);
+
+  @override
+  bool get canNextPlay => _canMoveEpisode(1);
+
   @override
   bool prevPlay() {
     final episodes = this.episodes;

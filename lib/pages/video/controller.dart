@@ -53,6 +53,7 @@ import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
+import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/extension/nested_scroll_ext.dart';
@@ -498,6 +499,7 @@ class VideoDetailController extends GetxController
         } else {
           mediaList.addAll(response.mediaList);
         }
+        videoPlayerServiceHandler?.refreshPlaybackState();
       }
     } else {
       res.toast();

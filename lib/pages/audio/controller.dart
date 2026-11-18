@@ -199,6 +199,13 @@ class AudioController extends GetxController
       ?..onPlay = onPlay
       ..onPause = onPause
       ..onSeek = onSeek
+      ..setSkipHandlers(
+        hashCode.toString(),
+        onSkipToPrevious: playPrev,
+        onSkipToNext: playNext,
+        canSkipToPrevious: () => index != null && index! > 0,
+        canSkipToNext: _canPlayNext,
+      )
       ..isPlaying = () => player?.state.playing ?? false;
 
     animController = AnimationController(
@@ -282,19 +289,21 @@ class AudioController extends GetxController
         final index = response.list.indexWhere((e) => e.item.oid == oid);
         if (index != -1) {
           this.index = index;
-          _updateCurrItem(response.list[index]);
           playlist = response.list;
+          _updateCurrItem(response.list[index]);
         }
       } else if (isLoadPrev) {
         _prev = response.reachStart ? null : response.paginationReply.prev;
         if (response.list.isNotEmpty) {
-          index += response.list.length;
+          index = (index ?? 0) + response.list.length;
           playlist?.insertAll(0, response.list);
+          videoPlayerServiceHandler?.refreshPlaybackState();
         }
       } else if (isLoadNext) {
         _next = response.reachEnd ? null : response.paginationReply.next;
         if (response.list.isNotEmpty) {
           playlist?.addAll(response.list);
+          videoPlayerServiceHandler?.refreshPlaybackState();
         }
       }
     } else {
@@ -712,6 +721,12 @@ class AudioController extends GetxController
       ),
     );
   }
+
+  bool _canPlayNext() =>
+      index != null &&
+      playlist != null &&
+      player != null &&
+      index! + 1 < playlist!.length;
 
   bool playPrev() {
     if (index != null && playlist != null && player != null) {

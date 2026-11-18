@@ -39,7 +39,16 @@ typedef _StatusConfig = (
   bool isBuffering,
   bool isLive,
   double speed,
+  bool canPrev,
+  bool canNext,
 );
+
+typedef SkipHandlers = ({
+  bool Function()? onSkipToPrevious,
+  bool Function()? onSkipToNext,
+  bool Function()? canSkipToPrevious,
+  bool Function()? canSkipToNext,
+});
 
 class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   static final List<MediaItem> _item = [];
@@ -49,6 +58,46 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   Future<void>? Function()? onPlay;
   Future<void>? Function()? onPause;
   Future<void>? Function(Duration position)? onSeek;
+
+  final Map<String, SkipHandlers> _skipHandlers = {};
+  final List<String> _heroTagStack = [];
+
+  String? get _activeHeroTag =>
+      _heroTagStack.isNotEmpty ? _heroTagStack.last : null;
+
+  SkipHandlers? get _activeSkipHandlers =>
+      _activeHeroTag != null ? _skipHandlers[_activeHeroTag!] : null;
+
+  void setSkipHandlers(
+    String herotag, {
+    bool Function()? onSkipToPrevious,
+    bool Function()? onSkipToNext,
+    bool Function()? canSkipToPrevious,
+    bool Function()? canSkipToNext,
+  }) {
+    _skipHandlers[herotag] = (
+      onSkipToPrevious: onSkipToPrevious,
+      onSkipToNext: onSkipToNext,
+      canSkipToPrevious: canSkipToPrevious,
+      canSkipToNext: canSkipToNext,
+    );
+    _heroTagStack
+      ..remove(herotag)
+      ..add(herotag);
+    refreshPlaybackState();
+  }
+
+  void refreshPlaybackState() {
+    final last = _lastConfig;
+    if (!enableBackgroundPlay || _item.isEmpty || last == null) return;
+    onUpdateState(
+      last.$1,
+      last.$2,
+      last.$3,
+      position: _lastPos ?? playbackState.value.updatePosition,
+      speed: last.$4,
+    );
+  }
 
   @override
   Future<void> play() {
@@ -69,6 +118,18 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     return onSeek?.call(position) ??
         PlPlayerController.seekToIfExists(position) ??
         Future.syncValue(null);
+  }
+
+  @override
+  Future<void> skipToPrevious() async {
+    if (!enableBackgroundPlay) return;
+    _activeSkipHandlers?.onSkipToPrevious?.call();
+  }
+
+  @override
+  Future<void> skipToNext() async {
+    if (!enableBackgroundPlay) return;
+    _activeSkipHandlers?.onSkipToNext?.call();
   }
 
   void setMediaItem(MediaItem newMediaItem) {
@@ -98,7 +159,9 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
     if (onPlay != null && debugLabel == 'onVideoPaused') return;
 
-    final newConfig = (status, isBuffering, isLive, speed);
+    final canPrev = _activeSkipHandlers?.canSkipToPrevious?.call() ?? false;
+    final canNext = _activeSkipHandlers?.canSkipToNext?.call() ?? false;
+    final newConfig = (status, isBuffering, isLive, speed, canPrev, canNext);
     if (_lastConfig == newConfig) {
       if (_lastPos != null) {
         final pos = position.inSeconds;
@@ -107,6 +170,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
         if (pos == lastPos && pos != 0) return;
       }
     }
+    _lastPos = position;
     _lastConfig = newConfig;
 
     final AudioProcessingState processingState;
@@ -128,6 +192,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
       isLive,
       position: position,
       speed: speed,
+      canPrev: canPrev,
+      canNext: canNext,
     );
   }
 
@@ -137,6 +203,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     bool isLive, {
     required Duration position,
     required double speed,
+    bool canPrev = false,
+    bool canNext = false,
   }) {
     playbackState.add(
       playbackState.value.copyWith(
@@ -170,7 +238,11 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
             ),
         ],
         playing: playing,
-        systemActions: const {.seek},
+        systemActions: {
+          .seek,
+          if (canPrev) .skipToPrevious,
+          if (canNext) .skipToNext,
+        },
       ),
     );
     if (Platform.isAndroid &&
@@ -198,7 +270,9 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     // }
     if (data == null) return;
 
-    Uri getUri(String? cover) => Uri.parse(ImageUtils.safeThumbnailUrl(cover));
+    Uri? getUri(String? cover) => (cover == null || cover.isEmpty)
+        ? null
+        : Uri.parse(ImageUtils.safeThumbnailUrl(cover));
 
     late final id = '$cid$herotag';
     final MediaItem mediaItem;
@@ -209,6 +283,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
           mediaItem = MediaItem(
             id: id,
             title: current?.part ?? '',
+            album: data.title,
             artist: data.owner?.name,
             duration: Duration(seconds: current?.duration ?? 0),
             artUri: getUri(data.pic),
@@ -273,11 +348,17 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
       default:
         return;
     }
+    _heroTagStack
+      ..remove(herotag)
+      ..add(herotag);
     _item.add(mediaItem);
     setMediaItem(mediaItem);
+    refreshPlaybackState();
   }
 
   void onVideoDetailDispose(String herotag) {
+    _skipHandlers.remove(herotag);
+    _heroTagStack.remove(herotag);
     if (!enableBackgroundPlay) return;
 
     if (_item.isNotEmpty) {
@@ -285,8 +366,18 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     }
     if (_item.isNotEmpty) {
       setMediaItem(_item.last);
+      final canPrev = _activeSkipHandlers?.canSkipToPrevious?.call() ?? false;
+      final canNext = _activeSkipHandlers?.canSkipToNext?.call() ?? false;
       playbackState.add(
-        playbackState.value.copyWith(processingState: .ready, playing: false),
+        playbackState.value.copyWith(
+          processingState: .ready,
+          playing: false,
+          systemActions: {
+            .seek,
+            if (canPrev) .skipToPrevious,
+            if (canNext) .skipToNext,
+          },
+        ),
       );
     }
   }
@@ -297,6 +388,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   }
 
   void clear() {
+    _skipHandlers.clear();
+    _heroTagStack.clear();
     if (!enableBackgroundPlay) return;
     mediaItem.add(null);
     _item.clear();

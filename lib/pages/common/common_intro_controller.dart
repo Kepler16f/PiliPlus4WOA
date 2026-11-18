@@ -61,6 +61,9 @@ abstract class CommonIntroController extends GetxController
 
   void queryVideoIntro();
 
+  bool get canPrevPlay => false;
+  bool get canNextPlay => false;
+
   bool prevPlay();
   bool nextPlay();
 

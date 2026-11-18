@@ -107,11 +107,6 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
         }
         return;
       }
-      videoPlayerServiceHandler?.onVideoDetailChange(
-        response,
-        cid.value,
-        heroTag,
-      );
       final currentDetail = videoDetail.value;
       if (currentDetail.ugcSeason?.id == response.ugcSeason?.id) {
         // keep reversed season
@@ -125,6 +120,11 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       }
       videoDetail.value = response;
       updateIndex(data: response);
+      videoPlayerServiceHandler?.onVideoDetailChange(
+        response,
+        cid.value,
+        heroTag,
+      );
       try {
         if (videoDetailCtr.cover.value.isEmpty ||
             (videoDetailCtr.videoUrl.isNullOrEmpty &&
@@ -187,6 +187,7 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
 
     // ignore: invalid_use_of_visible_for_testing_member, invalid_use_of_protected_member
     indexNotifier.notifyListeners();
+    videoPlayerServiceHandler?.refreshPlaybackState();
   }
 
   // 获取up主粉丝数
@@ -606,6 +607,76 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       return false;
     }
   }
+
+  bool _canMoveEpisode({required int delta, bool skipPart = false}) {
+    final List<BaseEpisodeItem> episodes = <BaseEpisodeItem>[];
+    bool isPart = false;
+    final videoDetail = this.videoDetail.value;
+    if (!skipPart && videoDetail.hasParts) {
+      isPart = true;
+      episodes.addAll(videoDetail.pages!);
+    } else if (videoDetailCtr.isPlayAll) {
+      episodes.addAll(videoDetailCtr.mediaList);
+    } else if (videoDetail.hasSeason) {
+      for (final section in videoDetail.ugcSeason!.sections!) {
+        episodes.addAll(section.episodes!);
+      }
+    }
+
+    final PlayRepeat playRepeat = videoDetailCtr.plPlayerController.playRepeat;
+    if (episodes.isEmpty) {
+      if (delta > 0) {
+        if (playRepeat == PlayRepeat.listCycle) return true;
+        if (playRepeat == PlayRepeat.autoPlayRelated &&
+            videoDetailCtr.plPlayerController.showRelatedVideo) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    final targetCid = skipPart ? seasonCid : cid.rawValue;
+    final currIndex = episodes.indexWhere((e) => e.cid == targetCid);
+    if (currIndex < 0) return false;
+
+    int targetIndex = currIndex + delta;
+    while (targetIndex >= 0 &&
+        targetIndex < episodes.length &&
+        episodes[targetIndex].cid == null) {
+      targetIndex += delta;
+    }
+
+    if (targetIndex < 0) {
+      if (isPart && (videoDetailCtr.isPlayAll || videoDetail.hasSeason)) {
+        return _canMoveEpisode(delta: delta, skipPart: true);
+      }
+      return playRepeat == PlayRepeat.listCycle && episodes.length > 1;
+    }
+
+    if (targetIndex >= episodes.length) {
+      if (isPart &&
+          (videoDetailCtr.isPlayAll || videoDetail.ugcSeason != null)) {
+        return _canMoveEpisode(delta: delta, skipPart: true);
+      }
+      if (playRepeat == PlayRepeat.listCycle && episodes.length > 1) {
+        return true;
+      }
+      if (delta > 0 &&
+          playRepeat == PlayRepeat.autoPlayRelated &&
+          videoDetailCtr.plPlayerController.showRelatedVideo) {
+        return true;
+      }
+      return false;
+    }
+
+    return episodes[targetIndex].cid != cid.value;
+  }
+
+  @override
+  bool get canPrevPlay => _canMoveEpisode(delta: -1);
+
+  @override
+  bool get canNextPlay => _canMoveEpisode(delta: 1);
 
   /// 播放上一个
   @override
