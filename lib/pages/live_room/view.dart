@@ -287,7 +287,12 @@ class _LiveRoomPageState extends State<LiveRoomPage>
         !plPlayerController.isDesktopPip) {
       liveController.fsSC.value = null;
     }
+    final wasHiddenChat =
+        liveController.isFullScreen || plPlayerController.isPipMode;
     liveController.isFullScreen = isFullScreen;
+    if (wasHiddenChat && !isFullScreen && !isPipMode) {
+      liveController.refreshMsgIfNeeded();
+    }
     Widget player = Obx(
       key: playerKey,
       () {
@@ -1129,32 +1134,42 @@ class _LiveDanmakuState extends State<LiveDanmaku> {
   @override
   void didUpdateWidget(LiveDanmaku oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.notFullscreen != widget.notFullscreen &&
-        !DanmakuOptions.sameFontScale) {
+    if (oldWidget.isPipMode != widget.isPipMode ||
+        (oldWidget.notFullscreen != widget.notFullscreen &&
+            !DanmakuOptions.sameFontScale)) {
       plPlayerController.danmakuController?.updateOption(
-        DanmakuOptions.get(notFullscreen: widget.notFullscreen),
+        DanmakuOptions.get(
+          notFullscreen: widget.notFullscreen,
+          isPipMode: widget.isPipMode,
+        ),
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final option = DanmakuOptions.get(notFullscreen: widget.notFullscreen);
+    final option = DanmakuOptions.get(
+      notFullscreen: widget.notFullscreen,
+      isPipMode: widget.isPipMode,
+    );
     return Obx(
-      () => AnimatedOpacity(
-        opacity: plPlayerController.enableShowLiveDanmaku.value
-            ? plPlayerController.danmakuOpacity.value
-            : 0,
-        duration: const Duration(milliseconds: 100),
-        child: DanmakuScreen<DanmakuExtra>(
-          createdController: (e) {
-            widget.liveRoomController.danmakuController =
-                plPlayerController.danmakuController = e;
-          },
-          option: option,
-          size: widget.size,
-        ),
-      ),
+      () {
+        final show = plPlayerController.enableShowLiveDanmaku.value;
+        final opacity = plPlayerController.danmakuOpacity.value;
+        return AnimatedOpacity(
+          opacity: show && opacity > 0 ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 100),
+          child: DanmakuScreen<DanmakuExtra>(
+            createdController: (e) {
+              widget.liveRoomController.danmakuController =
+                  plPlayerController.danmakuController = e;
+            },
+            option: option,
+            size: widget.size,
+            opacity: opacity,
+          ),
+        );
+      },
     );
   }
 }

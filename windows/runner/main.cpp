@@ -23,8 +23,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   // Disable Windows 11 background power throttling (EcoQoS) and timer
-  // resolution throttling so unfocused PiP / background playback is not
-  // starved on Windows on ARM64.
+  // resolution throttling, and keep process priority above normal so unfocused
+  // PiP / background playback is not starved by foreground apps on ARM64.
+  ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
   PROCESS_POWER_THROTTLING_STATE power_throttling{};
   power_throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
   power_throttling.ControlMask =

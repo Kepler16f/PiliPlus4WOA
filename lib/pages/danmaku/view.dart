@@ -6,6 +6,7 @@ import 'package:PiliPlus/pages/danmaku/danmaku_model.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/danmaku_pip_policy.dart';
 import 'package:PiliPlus/utils/danmaku_utils.dart';
 import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:get/get.dart';
@@ -68,11 +69,13 @@ class _PlDanmakuState extends State<PlDanmaku> {
   @override
   void didUpdateWidget(PlDanmaku oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.notFullscreen != widget.notFullscreen &&
-        !DanmakuOptions.sameFontScale) {
+    if (oldWidget.isPipMode != widget.isPipMode ||
+        (oldWidget.notFullscreen != widget.notFullscreen &&
+            !DanmakuOptions.sameFontScale)) {
       _controller?.updateOption(
         DanmakuOptions.get(
           notFullscreen: widget.notFullscreen,
+          isPipMode: widget.isPipMode,
           speed: playerController.playbackSpeed,
         ),
       );
@@ -116,11 +119,24 @@ class _PlDanmakuState extends State<PlDanmaku> {
     if (currentDanmakuList != null) {
       final blockColorful = DanmakuOptions.blockColorful;
       final danmakuWeight = DanmakuOptions.danmakuWeight;
+      final isPip = widget.isPipMode || playerController.isPipMode;
+      // 限制单个 100ms 桶内的新增弹幕上限，避免整秒扎堆弹幕在同一帧内触发大量
+      // toImageSync 离屏 FBO 分配导致 PiP / 高密弹幕画面卡顿。
+      final maxAddPerTick = DanmakuPipPolicy.maxAddPerTick(isPipMode: isPip);
+      final static2Scroll = DanmakuOptions.danmakuStatic2Scroll;
+      final massiveMode = !isPip && DanmakuOptions.danmakuMassiveMode;
+      int addedCount = 0;
+      int scrollRejects = 0;
+      bool staticFull = false;
       for (DanmakuElem e in currentDanmakuList) {
         if (e.weight < danmakuWeight) continue;
+        final isSelf = e.isSelf;
+        if (!isSelf && addedCount >= maxAddPerTick) {
+          continue;
+        }
         if (e.mode == 7) {
           try {
-            _controller!.addDanmaku(
+            if (_controller!.addDanmaku(
               SpecialDanmakuContentItem.fromList(
                 DmUtils.decimalToColor(e.color),
                 e.fontsize.toDouble(),
@@ -131,21 +147,32 @@ class _PlDanmakuState extends State<PlDanmaku> {
                   like: e.likeCount.toInt(),
                 ),
               ),
-            );
+            )) {
+              addedCount++;
+            }
           } catch (_) {}
         } else {
-          _controller!.addDanmaku(
+          final dmType = DmUtils.getPosition(e.mode);
+          if (!isSelf) {
+            if (dmType == DanmakuItemType.scroll) {
+              if (!massiveMode && scrollRejects >= 3) continue;
+            } else if (staticFull &&
+                (!static2Scroll || (!massiveMode && scrollRejects >= 3))) {
+              continue;
+            }
+          }
+          final added = _controller!.addDanmaku(
             DanmakuContentItem(
               e.content,
               color: blockColorful
                   ? Colors.white
                   : DmUtils.decimalToColor(e.color),
-              type: DmUtils.getPosition(e.mode),
+              type: dmType,
               isColorful:
                   playerController.showVipDanmaku &&
                   e.colorful == DmColorfulType.VipGradualColor,
               count: e.count > 1 ? e.count : null,
-              selfSend: e.isSelf,
+              selfSend: isSelf,
               extra: VideoDanmaku(
                 id: e.id.toInt(),
                 mid: e.midHash,
@@ -153,6 +180,18 @@ class _PlDanmakuState extends State<PlDanmaku> {
               ),
             ),
           );
+          if (added) {
+            addedCount++;
+            if (dmType == DanmakuItemType.scroll) {
+              scrollRejects = 0;
+            }
+          } else if (!isSelf) {
+            if (dmType == DanmakuItemType.scroll) {
+              scrollRejects++;
+            } else {
+              staticFull = true;
+            }
+          }
         }
       }
     }
@@ -172,22 +211,26 @@ class _PlDanmakuState extends State<PlDanmaku> {
   Widget build(BuildContext context) {
     final option = DanmakuOptions.get(
       notFullscreen: widget.notFullscreen,
+      isPipMode: widget.isPipMode,
       speed: playerController.playbackSpeed,
     );
     return Obx(
-      () => AnimatedOpacity(
-        opacity: playerController.enableShowDanmaku.value
-            ? playerController.danmakuOpacity.value
-            : 0,
-        duration: const Duration(milliseconds: 100),
-        child: DanmakuScreen<DanmakuExtra>(
-          createdController: (e) {
-            playerController.danmakuController = _controller = e;
-          },
-          option: option,
-          size: widget.size,
-        ),
-      ),
+      () {
+        final show = playerController.enableShowDanmaku.value;
+        final opacity = playerController.danmakuOpacity.value;
+        return AnimatedOpacity(
+          opacity: show && opacity > 0 ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 100),
+          child: DanmakuScreen<DanmakuExtra>(
+            createdController: (e) {
+              playerController.danmakuController = _controller = e;
+            },
+            option: option,
+            size: widget.size,
+            opacity: opacity,
+          ),
+        );
+      },
     );
   }
 }

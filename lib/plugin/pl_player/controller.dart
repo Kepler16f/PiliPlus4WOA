@@ -413,6 +413,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
         width: pipRect.width,
         height: pipRect.height,
       );
+      isDesktopPip = true;
       window
         ..bounds = _lastPipBounds!
         ..aspectRatio = aspectRatio;
@@ -420,9 +421,8 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
       if (showWindowTitleBar) {
         window.titleBarStyle = nativeapi.TitleBarStyle.hidden;
       }
-
-      isDesktopPip = true;
     } catch (e) {
+      isDesktopPip = false;
       Utils.reportError('pip: enterDesktopPip failed: $e', null);
     } finally {
       _pipTransitioning = false;

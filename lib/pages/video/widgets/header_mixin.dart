@@ -70,7 +70,8 @@ mixin HeaderMixin<T extends StatefulWidget> on State<T> {
 
         void setOptions() => danmakuController?.updateOption(
           DanmakuOptions.get(
-            notFullscreen: !isFullScreen,
+            notFullscreen: !isFullScreen || plPlayerController.isPipMode,
+            isPipMode: plPlayerController.isPipMode,
             speed: plPlayerController.playbackSpeed,
           ),
         );

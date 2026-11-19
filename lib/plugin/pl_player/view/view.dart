@@ -1746,15 +1746,12 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                     ? const Offset(0.0, 1.2)
                     : const Offset(0.0, 0.8),
                 child: Obx(
-                  () => AnimatedOpacity(
-                    curve: Curves.easeInOut,
-                    opacity:
-                        plPlayerController.isSeeking.value &&
-                            plPlayerController.hoverDx == null
-                        ? 1.0
-                        : 0.0,
-                    duration: const Duration(milliseconds: 150),
-                    child: Container(
+                  () {
+                    if (!plPlayerController.isSeeking.value ||
+                        plPlayerController.hoverDx != null) {
+                      return const SizedBox.shrink();
+                    }
+                    return Container(
                       decoration: const BoxDecoration(
                         color: Color(0x88000000),
                         borderRadius: BorderRadius.all(Radius.circular(64)),
@@ -1787,8 +1784,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                           ),
                         ],
                       ),
-                    ),
-                  ),
+                    );
+                  },
                 ),
               ),
             ),
@@ -2388,7 +2385,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                     // 盒子（外层是黑底，于是表现为"黑屏且无任何线索"），
                     // 竖屏视频黑屏正是落在这条路径上。详见该文件头注释。
                     child: Container(
-                      foregroundDecoration: Platform.isWindows
+                      foregroundDecoration:
+                          Platform.isWindows && _brightnessValue.value < 1.0
                           ? BoxDecoration(
                               color: Colors.black.withValues(
                                 alpha: 1.0 - _brightnessValue.value,

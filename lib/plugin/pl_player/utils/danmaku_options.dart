@@ -1,4 +1,6 @@
+import 'package:PiliPlus/plugin/pl_player/utils/danmaku_pip_policy.dart';
 import 'package:PiliPlus/utils/extension/box_ext.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
@@ -25,10 +27,17 @@ abstract final class DanmakuOptions {
 
   static DanmakuOption get({
     required bool notFullscreen,
+    bool isPipMode = false,
     double speed = 1.0,
   }) {
     return DanmakuOption(
-      fontSize: 15 * (notFullscreen ? danmakuFontScale : danmakuFontScaleFS),
+      fontSize: DanmakuPipPolicy.effectiveFontSize(
+        notFullscreen: notFullscreen,
+        isPipMode: isPipMode,
+        fontScale: danmakuFontScale,
+        fontScaleFS: danmakuFontScaleFS,
+        isDesktop: PlatformUtils.isDesktop,
+      ),
       fontWeight: danmakuFontWeight,
       area: danmakuShowArea,
       duration: danmakuDuration / speed,
@@ -37,9 +46,15 @@ abstract final class DanmakuOptions {
       hideScroll: blockTypes.contains(2),
       hideTop: blockTypes.contains(5),
       hideSpecial: blockTypes.contains(7),
-      strokeWidth: danmakuStrokeWidth,
+      strokeWidth: DanmakuPipPolicy.effectiveStrokeWidth(
+        strokeWidth: danmakuStrokeWidth,
+        isPipMode: isPipMode,
+      ),
       scrollFixedVelocity: danmakuFixedV,
-      massiveMode: danmakuMassiveMode,
+      massiveMode: DanmakuPipPolicy.effectiveMassiveMode(
+        massiveMode: danmakuMassiveMode,
+        isPipMode: isPipMode,
+      ),
       static2Scroll: danmakuStatic2Scroll,
       safeArea: true,
       lineHeight: danmakuLineHeight,
