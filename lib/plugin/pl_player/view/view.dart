@@ -1746,12 +1746,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                     ? const Offset(0.0, 1.2)
                     : const Offset(0.0, 0.8),
                 child: Obx(
-                  () {
-                    if (!plPlayerController.isSeeking.value ||
-                        plPlayerController.hoverDx != null) {
-                      return const SizedBox.shrink();
-                    }
-                    return Container(
+                  () => AnimatedOpacity(
+                    curve: Curves.easeInOut,
+                    opacity:
+                        plPlayerController.isSeeking.value &&
+                            plPlayerController.hoverDx == null
+                        ? 1.0
+                        : 0.0,
+                    duration: const Duration(milliseconds: 150),
+                    child: Container(
                       decoration: const BoxDecoration(
                         color: Color(0x88000000),
                         borderRadius: BorderRadius.all(Radius.circular(64)),
@@ -1784,8 +1787,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                           ),
                         ],
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),

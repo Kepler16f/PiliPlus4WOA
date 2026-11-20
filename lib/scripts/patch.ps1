@@ -219,32 +219,36 @@ foreach ($patch in $patches_material) {
     if ($LASTEXITCODE -ne 0) { throw "$LASTEXITCODE" }
 }
 
-# WOA 修改版：给 canvas_danmaku 打性能优化补丁（轨道快速预检、LRU 纹理缓存、
-# 去除每帧冗余 PictureRecorder、Opacity 直绘避免全屏 saveLayer、PiP 缩窗纹理释放）。
+# WOA 修改版：对齐上游 Predidit/canvas_danmaku (#19 pipeline / #25 microsecond repaint)
+# 与 bggRGjQaUbCoE/canvas_danmaku (#19 FilterQuality.low) 的弹幕渲染管线补丁。
 $CanvasDanmakuDir = Get-PackageDirectory "canvas_danmaku"
 if (-not (Test-Path -LiteralPath $CanvasDanmakuDir)) {
     throw "canvas_danmaku package directory not found: $CanvasDanmakuDir"
 }
 Write-Host "canvas_danmaku dir: $CanvasDanmakuDir"
-$CanvasDanmakuPatch = "$env:GITHUB_WORKSPACE/lib/scripts/canvas_danmaku.patch"
+$CanvasDanmakuPatch = Join-Path $env:GITHUB_WORKSPACE "lib/scripts/canvas_danmaku.patch"
 (Get-Content -LiteralPath $CanvasDanmakuPatch -Raw) -replace "`r`n", "`n" |
-    Set-Content -NoNewline -LiteralPath $CanvasDanmakuPatch
-cd $CanvasDanmakuDir
-git apply --reverse --check $CanvasDanmakuPatch 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "lib/scripts/canvas_danmaku.patch already applied"
-} else {
-    git apply --check $CanvasDanmakuPatch
-    if ($LASTEXITCODE -ne 0) {
-        throw "canvas_danmaku.patch check failed: $LASTEXITCODE"
+    Set-Content -LiteralPath $CanvasDanmakuPatch -NoNewline
+
+Push-Location $CanvasDanmakuDir
+try {
+    git apply --reverse --check $CanvasDanmakuPatch 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "lib/scripts/canvas_danmaku.patch already applied"
+    } else {
+        git apply --check $CanvasDanmakuPatch
+        if ($LASTEXITCODE -ne 0) {
+            throw "canvas_danmaku.patch check failed with exit code $LASTEXITCODE"
+        }
+        git apply $CanvasDanmakuPatch
+        if ($LASTEXITCODE -ne 0) {
+            throw "canvas_danmaku.patch apply failed with exit code $LASTEXITCODE"
+        }
+        Write-Host "lib/scripts/canvas_danmaku.patch applied OK"
     }
-    git apply $CanvasDanmakuPatch
-    if ($LASTEXITCODE -ne 0) {
-        throw "canvas_danmaku.patch apply failed: $LASTEXITCODE"
-    }
-    Write-Host "lib/scripts/canvas_danmaku.patch applied"
+} finally {
+    Pop-Location
 }
-cd $env:GITHUB_WORKSPACE
 
 # WOA 修改版：给 media_kit_video 的 Windows 原生渲染路径打补丁
 # （画面冻结的取证计数器 + SetSize 的锁修复）。

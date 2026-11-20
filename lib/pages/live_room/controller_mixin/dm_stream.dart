@@ -68,10 +68,7 @@ mixin _LiveDMStreamMixin
       if (item != null && plPlayerController.enableShowLiveDanmaku.value) {
         danmakuController?.addDanmaku(item);
       }
-      if (!isFullScreen &&
-          !plPlayerController.isPipMode &&
-          autoScroll &&
-          !disableAutoScroll.value) {
+      if (autoScroll && !disableAutoScroll.value) {
         messages.add(msg);
         scrollToBottom();
         return;

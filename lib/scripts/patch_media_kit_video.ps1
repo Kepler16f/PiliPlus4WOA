@@ -1,4 +1,4 @@
-﻿# PiliPlus4WOA: patch media_kit_video's Windows native renderer.
+# PiliPlus4WOA: patch media_kit_video's Windows native renderer.
 #
 # Why this file exists (instead of a .patch applied with `git apply`):
 # the code we need to touch lives in a *git* dependency in the pub cache, whose
@@ -96,8 +96,6 @@ $videoPath = Join-Path $videoDir "video_output.cc"
 $videoHeaderPath = Join-Path $videoDir "video_output.h"
 $utilsPath = Join-Path $videoDir "utils.cc"
 $mailboxPath = Join-Path $videoDir "mailbox_swap_chain.cc"
-$d3d11RendererPath = Join-Path $videoDir "d3d11_renderer.cc"
-$threadPoolPath = Join-Path $videoDir "thread_pool.h"
 
 # media_kit_video 的 Windows 渲染后端有两套，补丁内容完全不同：
 #   * ANGLE/OpenGL（旧）：存在 angle_surface_manager.*
@@ -108,7 +106,7 @@ $threadPoolPath = Join-Path $videoDir "thread_pool.h"
 # media_kit_video 会**静默**回退到 CPU 软件渲染 —— 表现就是「画面卡死、声音
 # 继续播放」。DXGI 路径让 mpv 直接持有 D3D11 设备，d3d11va 才能零拷贝工作。
 $useAngle = Test-Path $anglePath
-$useDxgi = Test-Path $d3d11RendererPath
+$useDxgi = Test-Path (Join-Path $videoDir "d3d11_renderer.cc")
 
 foreach ($p in @($videoPath, $videoHeaderPath, $utilsPath)) {
     if (-not (Test-Path $p)) { throw "missing source file: $p" }
@@ -119,9 +117,7 @@ if ($useAngle) {
     }
 }
 if ($useDxgi) {
-    foreach ($p in @($mailboxPath, $d3d11RendererPath, $threadPoolPath)) {
-        if (-not (Test-Path $p)) { throw "missing source file: $p" }
-    }
+    if (-not (Test-Path $mailboxPath)) { throw "missing source file: $mailboxPath" }
 }
 if (-not $useAngle -and -not $useDxgi) {
     throw "media_kit_video/windows has neither angle_surface_manager.cc nor d3d11_renderer.cc -- unknown renderer variant, update lib/scripts/patch_media_kit_video.ps1"
@@ -942,42 +938,6 @@ HANDLE MailboxSwapChain::ConsumerAcquire() {
 }
 '@
 
-$OldDxgiGpuPriority = @'
-  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
-  if (SUCCEEDED(d3d_11_device_->QueryInterface(__uuidof(IDXGIDevice),
-                                               (void**)&dxgi_device)) &&
-      dxgi_device) {
-    dxgi_device->SetGPUThreadPriority(5);
-  }
-'@
-$NewDxgiGpuPriority = @'
-  // PiliPlus4WOA: keep mpv's offscreen producer D3D11 device at balanced GPU
-  // priority (0) instead of +5 so it does not preempt Flutter's ANGLE
-  // compositor device on Qualcomm Adreno during dense danmaku rendering in PiP.
-  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
-  if (SUCCEEDED(d3d_11_device_->QueryInterface(__uuidof(IDXGIDevice),
-                                               (void**)&dxgi_device)) &&
-      dxgi_device) {
-    dxgi_device->SetGPUThreadPriority(0);
-  }
-'@
-
-$OldDxgiThreadPriority = @'
-#ifdef _WIN32
-    ::SetThreadPriority(workers_.back().native_handle(),
-                        THREAD_PRIORITY_HIGHEST);
-#endif
-'@
-$NewDxgiThreadPriority = @'
-#ifdef _WIN32
-    // PiliPlus4WOA: use ABOVE_NORMAL instead of HIGHEST so the offscreen mpv
-    // producer worker does not starve Flutter's UI/Raster threads under heavy
-    // danmaku load.
-    ::SetThreadPriority(workers_.back().native_handle(),
-                        THREAD_PRIORITY_ABOVE_NORMAL);
-#endif
-'@
-
 $edits = @(
     @{ file = $utilsPath; old = $OldFullscreenRect; new = $NewFullscreenRect;                label = "utils.cc: EnterNativeFullscreen must use GetWindowRect (26H2 taskbar-height shift)" }
 )
@@ -1014,9 +974,7 @@ if ($useAngle) {
         @{ file = $videoPath; old = $OldDxgiSetSize; new = $NewDxgiSetSize; label = "video_output.cc: proportional software dimensions on explicit resize" },
         @{ file = $videoPath; old = $OldDxgiTimingOffset; new = $NewDxgiTimingOffset; label = "video_output.cc: video-timing-offset 0.05" },
         @{ file = $mailboxPath; old = $OldDxgiProducerSignal; new = $NewDxgiProducerSignal; label = "mailbox_swap_chain.cc: ProducerCommit flush" },
-        @{ file = $mailboxPath; old = $OldDxgiConsumerAcquire; new = $NewDxgiConsumerAcquire; label = "mailbox_swap_chain.cc: ConsumerAcquire promote pending if completed" },
-        @{ file = $d3d11RendererPath; old = $OldDxgiGpuPriority; new = $NewDxgiGpuPriority; label = "d3d11_renderer.cc: balanced GPU thread priority 0" },
-        @{ file = $threadPoolPath; old = $OldDxgiThreadPriority; new = $NewDxgiThreadPriority; label = "thread_pool.h: ABOVE_NORMAL worker priority" }
+        @{ file = $mailboxPath; old = $OldDxgiConsumerAcquire; new = $NewDxgiConsumerAcquire; label = "mailbox_swap_chain.cc: ConsumerAcquire promote pending if completed" }
     )
 }
 
@@ -1026,7 +984,7 @@ if ($useAngle) {
 $states = @{}
 $filesToPatch = @($videoPath, $videoHeaderPath, $utilsPath)
 if ($useAngle) { $filesToPatch += @($headerPath, $anglePath) }
-if ($useDxgi) { $filesToPatch += @($mailboxPath, $d3d11RendererPath, $threadPoolPath) }
+if ($useDxgi) { $filesToPatch += @($mailboxPath) }
 foreach ($p in $filesToPatch) {
     $states[$p] = Get-Normalized $p
 }

@@ -23,9 +23,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   // Disable Windows 11 background power throttling (EcoQoS) and timer
-  // resolution throttling, and keep process priority above normal so unfocused
-  // PiP / background playback is not starved by foreground apps on ARM64.
-  ::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+  // resolution throttling so unfocused PiP / background playback is not
+  // starved on Windows on ARM64.
   PROCESS_POWER_THROTTLING_STATE power_throttling{};
   power_throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
   power_throttling.ControlMask =
@@ -36,6 +35,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                           &power_throttling, sizeof(power_throttling));
 
   flutter::DartProject project(L"data");
+
+  // Disable UI/platform thread merging on Windows (following Predidit/Kazumi
+  // and Flutter #176088 / #192513) so Win32 message dispatch (system-wide
+  // WinEvent occlusion hooks in nativeapi, borderless PiP WM_NCHITTEST, DWM,
+  // and SMTC COM events) does not contend with the Dart UI isolate.
+  project.set_ui_thread_policy(flutter::UIThreadPolicy::RunOnSeparateThread);
 
   // https://github.com/flutter/flutter/issues/188635
   // https://github.com/flutter/flutter/issues/191050
