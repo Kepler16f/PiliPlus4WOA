@@ -264,3 +264,15 @@ try {
 } catch {
     throw "patch_media_kit_video.ps1 failed: $_"
 }
+
+# WOA 修改版：回溯合入 nativeapi-core 上游针对 Windows 的两项修复
+# （#97 移除全局 EVENT_OBJECT_LOCATIONCHANGE 鼠标/窗口移动洪泛 hook 并延迟安装遮挡监听；
+#   #95 加固 WindowManager::GetCurrent / GetAll 跨线程与隐藏窗口查找）。
+try {
+    & "$env:GITHUB_WORKSPACE/lib/scripts/patch_cnativeapi.ps1"
+    if ($LASTEXITCODE -ne 0) {
+        throw "exit code $LASTEXITCODE"
+    }
+} catch {
+    throw "patch_cnativeapi.ps1 failed: $_"
+}

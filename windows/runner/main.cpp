@@ -36,12 +36,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(L"data");
 
-  // Disable UI/platform thread merging on Windows (following Predidit/Kazumi
-  // and Flutter #176088 / #192513) so Win32 message dispatch (system-wide
-  // WinEvent occlusion hooks in nativeapi, borderless PiP WM_NCHITTEST, DWM,
-  // and SMTC COM events) does not contend with the Dart UI isolate.
-  project.set_ui_thread_policy(flutter::UIThreadPolicy::RunOnSeparateThread);
-
   // https://github.com/flutter/flutter/issues/188635
   // https://github.com/flutter/flutter/issues/191050
   // https://github.com/flutter/flutter/issues/191069
