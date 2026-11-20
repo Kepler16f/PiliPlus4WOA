@@ -247,6 +247,50 @@ void main() {
     expect(methodCalls.first.method, 'clear');
   });
 
+  test('stopService ignores stale clear during active session until idle', () async {
+    await service.setMediaItem(
+      const SetMediaItemRequest(
+        mediaItem: MediaItemMessage(id: 'video-1', title: 'Test Video'),
+      ),
+    );
+    await service.setState(
+      SetStateRequest(
+        state: PlaybackStateMessage(
+          playing: true,
+          processingState: AudioProcessingStateMessage.ready,
+          updatePosition: Duration.zero,
+          speed: 1.0,
+          controls: const [],
+          systemActions: const {},
+        ),
+      ),
+    );
+    methodCalls.clear();
+
+    // Delayed stopService arriving while a new session is active must not wipe SMTC.
+    await service.stopService(const StopServiceRequest());
+    expect(methodCalls, isEmpty);
+
+    // Once the state transitions to idle, stopService clears SMTC as expected.
+    await service.setState(
+      SetStateRequest(
+        state: PlaybackStateMessage(
+          playing: false,
+          processingState: AudioProcessingStateMessage.idle,
+          updatePosition: Duration.zero,
+          speed: 1.0,
+          controls: const [],
+          systemActions: const {},
+        ),
+      ),
+    );
+    methodCalls.clear();
+
+    await service.stopService(const StopServiceRequest());
+    expect(methodCalls, hasLength(1));
+    expect(methodCalls.first.method, 'clear');
+  });
+
   test('handles native onButtonPressed (including next/previous) and onSeekRequested', () async {
     final fakeCallbacks = _FakeAudioHandlerCallbacks();
     service.setHandlerCallbacks(fakeCallbacks);

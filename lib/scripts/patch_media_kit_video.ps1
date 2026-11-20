@@ -1,4 +1,4 @@
-# PiliPlus4WOA: patch media_kit_video's Windows native renderer.
+﻿# PiliPlus4WOA: patch media_kit_video's Windows native renderer.
 #
 # Why this file exists (instead of a .patch applied with `git apply`):
 # the code we need to touch lives in a *git* dependency in the pub cache, whose
@@ -95,7 +95,9 @@ $anglePath = Join-Path $videoDir "angle_surface_manager.cc"
 $videoPath = Join-Path $videoDir "video_output.cc"
 $videoHeaderPath = Join-Path $videoDir "video_output.h"
 $utilsPath = Join-Path $videoDir "utils.cc"
+$d3dRendererPath = Join-Path $videoDir "d3d11_renderer.cc"
 $mailboxPath = Join-Path $videoDir "mailbox_swap_chain.cc"
+$mailboxHeaderPath = Join-Path $videoDir "mailbox_swap_chain.h"
 
 # media_kit_video 的 Windows 渲染后端有两套，补丁内容完全不同：
 #   * ANGLE/OpenGL（旧）：存在 angle_surface_manager.*
@@ -106,7 +108,7 @@ $mailboxPath = Join-Path $videoDir "mailbox_swap_chain.cc"
 # media_kit_video 会**静默**回退到 CPU 软件渲染 —— 表现就是「画面卡死、声音
 # 继续播放」。DXGI 路径让 mpv 直接持有 D3D11 设备，d3d11va 才能零拷贝工作。
 $useAngle = Test-Path $anglePath
-$useDxgi = Test-Path (Join-Path $videoDir "d3d11_renderer.cc")
+$useDxgi = Test-Path $d3dRendererPath
 
 foreach ($p in @($videoPath, $videoHeaderPath, $utilsPath)) {
     if (-not (Test-Path $p)) { throw "missing source file: $p" }
@@ -117,7 +119,9 @@ if ($useAngle) {
     }
 }
 if ($useDxgi) {
-    if (-not (Test-Path $mailboxPath)) { throw "missing source file: $mailboxPath" }
+    foreach ($p in @($mailboxPath, $mailboxHeaderPath)) {
+        if (-not (Test-Path $p)) { throw "missing source file: $p" }
+    }
 }
 if (-not $useAngle -and -not $useDxgi) {
     throw "media_kit_video/windows has neither angle_surface_manager.cc nor d3d11_renderer.cc -- unknown renderer variant, update lib/scripts/patch_media_kit_video.ps1"
@@ -873,15 +877,91 @@ void VideoOutput::SetSize(std::optional<int64_t> width,
     if (width.has_value()) {
 '@
 
-$OldDxgiTimingOffset = @'
-    mpv_set_option_string(handle_, "video-sync", "audio");
-    mpv_set_option_string(handle_, "video-timing-offset", "0");
+$OldDxgiMultithread = @'
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+  if (SUCCEEDED(d3d_11_device_->QueryInterface(__uuidof(IDXGIDevice),
+                                               (void**)&dxgi_device)) &&
+      dxgi_device) {
+    dxgi_device->SetGPUThreadPriority(5);
+  }
 '@
-$NewDxgiTimingOffset = @'
-    mpv_set_option_string(handle_, "video-sync", "audio");
-    // PiliPlus4WOA: use mpv's default 50ms (0.05) presentation lookahead
-    // headroom instead of 0 to avoid micro-stutters right on the VSync deadline.
-    mpv_set_option_string(handle_, "video-timing-offset", "0.05");
+$NewDxgiMultithread = @'
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+  if (SUCCEEDED(d3d_11_device_->QueryInterface(__uuidof(IDXGIDevice),
+                                               (void**)&dxgi_device)) &&
+      dxgi_device) {
+    dxgi_device->SetGPUThreadPriority(5);
+  }
+
+  // PiliPlus4WOA: enable D3D11 device multithread protection so Flutter's
+  // raster thread can CopyResource from the completed slot to present_texture_
+  // safely while mpv renders into write_slot_ on the VideoOutput worker thread.
+  Microsoft::WRL::ComPtr<ID3D11Multithread> multithread;
+  if (SUCCEEDED(d3d_11_device_->QueryInterface(__uuidof(ID3D11Multithread),
+                                               (void**)&multithread)) &&
+      multithread) {
+    multithread->SetMultithreadProtected(TRUE);
+  }
+'@
+
+$OldMailboxHeaderIncludes = @'
+#include <atomic>
+#include <cstdint>
+'@
+$NewMailboxHeaderIncludes = @'
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+'@
+
+$OldMailboxHeaderSnapshot = @'
+  HANDLE ReadHandleSnapshot() const {
+    return slots_[latest_completed_slot_.load(std::memory_order_acquire)]
+        .shared_handle;
+  }
+'@
+$NewMailboxHeaderSnapshot = @'
+  HANDLE ReadHandleSnapshot() const {
+    return present_handle_;
+  }
+'@
+
+$OldMailboxHeaderSlot = @'
+  struct TextureSlot {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    HANDLE shared_handle = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+    uint64_t fence_value = 0;
+  };
+'@
+$NewMailboxHeaderSlot = @'
+  struct TextureSlot {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    HANDLE shared_handle = nullptr;
+    Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+    uint64_t fence_value = 0;
+    uint64_t seq = 0;
+  };
+'@
+
+$OldMailboxHeaderFields = @'
+  int write_slot_ = 0;  // producer-private
+
+  std::atomic<ULONG> ref_count_{1u};
+'@
+$NewMailboxHeaderFields = @'
+  int write_slot_ = 0;  // producer-private
+
+  // PiliPlus4WOA: single persistent shared presentation texture exposed to
+  // Flutter's ExternalTextureD3d so ANGLE never tears down/recreates EGL
+  // surfaces and OpenSharedResource handles on every rotating mailbox slot.
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> present_texture_;
+  HANDLE present_handle_ = nullptr;
+  std::mutex present_mutex_;
+  std::atomic<uint64_t> next_seq_{0};
+  uint64_t published_seq_ = 0;
+
+  std::atomic<ULONG> ref_count_{1u};
 '@
 
 $OldDxgiProducerSignal = @'
@@ -893,6 +973,7 @@ $NewDxgiProducerSignal = @'
 void MailboxSwapChain::ProducerCommit() {
   auto& ws = slots_[write_slot_];
   context4_->Signal(ws.fence.Get(), ++ws.fence_value);
+  ws.seq = next_seq_.fetch_add(1, std::memory_order_relaxed) + 1;
   // PiliPlus4WOA: immediately flush the Signal command so the Qualcomm Adreno
   // GPU driver does not buffer it indefinitely in CPU driver memory.
   context4_->Flush();
@@ -910,11 +991,11 @@ HANDLE MailboxSwapChain::ConsumerAcquire() {
 '@
 $NewDxgiConsumerAcquire = @'
 HANDLE MailboxSwapChain::ConsumerAcquire() {
-  // PiliPlus4WOA: non-blockingly check if the pending frame has already completed.
-  // When mpv signals a frame and calls MarkTextureFrameAvailable, Flutter's
-  // raster callback arrives several milliseconds later -- by which time the GPU
-  // has almost always finished rendering. Promoting here eliminates 1-2 frames
-  // of presentation latency and avoids dropping frames if ProducerCommit runs late.
+  // PiliPlus4WOA: non-blockingly check if the pending frame has already completed,
+  // then copy into the persistent present_texture_ only when a newer sequence
+  // number is ready. Returning a constant present_handle_ avoids per-frame
+  // eglDestroySurface / CreateSurfaceFromHandle thrashing in Flutter's
+  // ExternalTextureD3d on Qualcomm Adreno.
   uint32_t snap = mailbox_state_.load(std::memory_order_acquire);
   if (snap & (1u << 6)) {  // has_pending
     const int pend = static_cast<int>((snap >> 4) & 0x3u);
@@ -933,9 +1014,206 @@ HANDLE MailboxSwapChain::ConsumerAcquire() {
       }
     }
   }
-  return slots_[latest_completed_slot_.load(std::memory_order_acquire)]
-      .shared_handle;
+  std::lock_guard<std::mutex> lock(present_mutex_);
+  if (!present_texture_ || !present_handle_) {
+    return nullptr;
+  }
+  const int comp = latest_completed_slot_.load(std::memory_order_acquire);
+  const auto& cs = slots_[comp];
+  if (cs.texture && cs.seq != 0 && cs.seq != published_seq_) {
+    context4_->CopyResource(present_texture_.Get(), cs.texture.Get());
+    context4_->Flush();
+    published_seq_ = cs.seq;
+  }
+  return present_handle_;
 }
+'@
+
+$OldMailboxAllocateEnd = @'
+    slots_[i].fence_value = 0;
+  }
+
+  return S_OK;
+}
+
+void MailboxSwapChain::ReleaseSlots() {
+  for (auto& slot : slots_) {
+    slot.texture.Reset();
+    slot.shared_handle = nullptr;
+    slot.fence.Reset();
+    slot.fence_value = 0;
+  }
+}
+'@
+$NewMailboxAllocateEnd = @'
+    slots_[i].fence_value = 0;
+    slots_[i].seq = 0;
+  }
+
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> present_tex;
+  HRESULT present_hr = device_->CreateTexture2D(&desc, nullptr, &present_tex);
+  if (FAILED(present_hr)) {
+    std::cout << "media_kit: MailboxSwapChain: CreateTexture2D present failed "
+                 "(hr=0x" << std::hex << present_hr << std::dec << ")"
+              << std::endl;
+    return present_hr;
+  }
+
+  Microsoft::WRL::ComPtr<IDXGIResource> present_resource;
+  present_hr = present_tex.As(&present_resource);
+  if (FAILED(present_hr)) {
+    std::cout << "media_kit: MailboxSwapChain: As<IDXGIResource> present "
+                 "failed (hr=0x" << std::hex << present_hr << std::dec << ")"
+              << std::endl;
+    return present_hr;
+  }
+
+  HANDLE present_hdl = nullptr;
+  present_hr = present_resource->GetSharedHandle(&present_hdl);
+  if (FAILED(present_hr)) {
+    std::cout << "media_kit: MailboxSwapChain: GetSharedHandle present "
+                 "failed (hr=0x" << std::hex << present_hr << std::dec << ")"
+              << std::endl;
+    return present_hr;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(present_mutex_);
+    present_texture_ = std::move(present_tex);
+    present_handle_ = present_hdl;
+    published_seq_ = 0;
+  }
+
+  return S_OK;
+}
+
+void MailboxSwapChain::ReleaseSlots() {
+  std::lock_guard<std::mutex> lock(present_mutex_);
+  present_texture_.Reset();
+  present_handle_ = nullptr;
+  published_seq_ = 0;
+  for (auto& slot : slots_) {
+    slot.texture.Reset();
+    slot.shared_handle = nullptr;
+    slot.fence.Reset();
+    slot.fence_value = 0;
+    slot.seq = 0;
+  }
+}
+'@
+
+$OldDxgiVideoHeaderIncludes = @'
+#include <future>
+#include <memory>
+'@
+$NewDxgiVideoHeaderIncludes = @'
+#include <atomic>
+#include <future>
+#include <memory>
+'@
+
+$OldDxgiVideoHeaderPending = @'
+  bool destroyed_ = false;
+
+  std::mutex textures_mutex_ = std::mutex();
+'@
+$NewDxgiVideoHeaderPending = @'
+  bool destroyed_ = false;
+  std::atomic<bool> render_pending_{false};
+
+  std::mutex textures_mutex_ = std::mutex();
+'@
+
+$OldDxgiAdvancedControl = @'
+        int advanced_control = 1;
+        mpv_render_param params[] = {
+            {MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_API_TYPE_D3D11},
+            {MPV_RENDER_PARAM_D3D11_INIT_PARAMS, &init_params},
+            {MPV_RENDER_PARAM_ADVANCED_CONTROL, &advanced_control},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+'@
+$NewDxgiAdvancedControl = @'
+        // PiliPlus4WOA: disable ADVANCED_CONTROL (matches Predidit/media-kit) so
+        // CheckAndResize's synchronous mpv_get_property("video-out-params") on
+        // the worker thread cannot stall or deadlock against libmpv core.
+        mpv_render_param params[] = {
+            {MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_API_TYPE_D3D11},
+            {MPV_RENDER_PARAM_D3D11_INIT_PARAMS, &init_params},
+            {MPV_RENDER_PARAM_INVALID, nullptr},
+        };
+'@
+
+$OldDxgiNotifyRender = @'
+void VideoOutput::NotifyRender() {
+  if (destroyed_) {
+    return;
+  }
+  thread_pool_ref_->Post(std::bind(&VideoOutput::CheckAndResize, this));
+  thread_pool_ref_->Post(std::bind(&VideoOutput::Render, this));
+}
+'@
+$NewDxgiNotifyRender = @'
+void VideoOutput::NotifyRender() {
+  if (destroyed_) {
+    return;
+  }
+  // PiliPlus4WOA: coalesce duplicate wakeup callbacks (upstream media-kit
+  // PR #1474) and run CheckAndResize + Render in one queued task so
+  // ThreadPool(1) never builds up a multi-task backlog.
+  if (render_pending_.exchange(true, std::memory_order_acq_rel)) {
+    return;
+  }
+  thread_pool_ref_->Post([this]() {
+    render_pending_.store(false, std::memory_order_release);
+    if (destroyed_) {
+      return;
+    }
+    CheckAndResize();
+    Render();
+  });
+}
+'@
+
+$OldDxgiRenderResult = @'
+        mpv_render_context_render(render_context_, params);
+        target->Release();
+      } else {
+        std::cout << "media_kit: VideoOutput: could not obtain a D3D11 render "
+                     "target (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+      }
+      mpv_render_context_report_swap(render_context_);
+      g_piliTrace.swap++;
+      d3d11_renderer_->ProducerCommit();
+      g_piliTrace.commit++;
+'@
+$NewDxgiRenderResult = @'
+        const int render_res = mpv_render_context_render(render_context_, params);
+        target->Release();
+        if (render_res >= 0) {
+          mpv_render_context_report_swap(render_context_);
+          g_piliTrace.swap++;
+          d3d11_renderer_->ProducerCommit();
+          g_piliTrace.commit++;
+        }
+      } else {
+        std::cout << "media_kit: VideoOutput: could not obtain a D3D11 render "
+                     "target (hr=0x"
+                  << std::hex << hr << std::dec << ")" << std::endl;
+      }
+'@
+
+$OldDxgiGpuAcquireNullGuard = @'
+                desc->handle = d3d11_renderer_->ConsumerAcquire();
+                return desc;
+'@
+$NewDxgiGpuAcquireNullGuard = @'
+                desc->handle = d3d11_renderer_->ConsumerAcquire();
+                if (!desc->handle) {
+                  return (FlutterDesktopGpuSurfaceDescriptor*)nullptr;
+                }
+                return desc;
 '@
 
 $edits = @(
@@ -971,10 +1249,21 @@ if ($useAngle) {
     )
 } else {
     $edits += @(
+        @{ file = $d3dRendererPath; old = $OldDxgiMultithread; new = $NewDxgiMultithread; label = "d3d11_renderer.cc: enable ID3D11Multithread protection" },
+        @{ file = $mailboxHeaderPath; old = $OldMailboxHeaderIncludes; new = $NewMailboxHeaderIncludes; label = "mailbox_swap_chain.h: include mutex" },
+        @{ file = $mailboxHeaderPath; old = $OldMailboxHeaderSnapshot; new = $NewMailboxHeaderSnapshot; label = "mailbox_swap_chain.h: ReadHandleSnapshot returns present_handle_" },
+        @{ file = $mailboxHeaderPath; old = $OldMailboxHeaderSlot; new = $NewMailboxHeaderSlot; label = "mailbox_swap_chain.h: add seq to TextureSlot" },
+        @{ file = $mailboxHeaderPath; old = $OldMailboxHeaderFields; new = $NewMailboxHeaderFields; label = "mailbox_swap_chain.h: add persistent present_texture_ fields" },
+        @{ file = $mailboxPath; old = $OldDxgiProducerSignal; new = $NewDxgiProducerSignal; label = "mailbox_swap_chain.cc: ProducerCommit seq + flush" },
+        @{ file = $mailboxPath; old = $OldDxgiConsumerAcquire; new = $NewDxgiConsumerAcquire; label = "mailbox_swap_chain.cc: ConsumerAcquire persistent present_texture_ copy" },
+        @{ file = $mailboxPath; old = $OldMailboxAllocateEnd; new = $NewMailboxAllocateEnd; label = "mailbox_swap_chain.cc: AllocateSlots / ReleaseSlots persistent present_texture_" },
+        @{ file = $videoHeaderPath; old = $OldDxgiVideoHeaderIncludes; new = $NewDxgiVideoHeaderIncludes; label = "video_output.h: include atomic" },
+        @{ file = $videoHeaderPath; old = $OldDxgiVideoHeaderPending; new = $NewDxgiVideoHeaderPending; label = "video_output.h: render_pending_ coalescing flag" },
         @{ file = $videoPath; old = $OldDxgiSetSize; new = $NewDxgiSetSize; label = "video_output.cc: proportional software dimensions on explicit resize" },
-        @{ file = $videoPath; old = $OldDxgiTimingOffset; new = $NewDxgiTimingOffset; label = "video_output.cc: video-timing-offset 0.05" },
-        @{ file = $mailboxPath; old = $OldDxgiProducerSignal; new = $NewDxgiProducerSignal; label = "mailbox_swap_chain.cc: ProducerCommit flush" },
-        @{ file = $mailboxPath; old = $OldDxgiConsumerAcquire; new = $NewDxgiConsumerAcquire; label = "mailbox_swap_chain.cc: ConsumerAcquire promote pending if completed" }
+        @{ file = $videoPath; old = $OldDxgiAdvancedControl; new = $NewDxgiAdvancedControl; label = "video_output.cc: disable ADVANCED_CONTROL (Predidit/media-kit)" },
+        @{ file = $videoPath; old = $OldDxgiNotifyRender; new = $NewDxgiNotifyRender; label = "video_output.cc: coalesce NotifyRender (media-kit PR #1474)" },
+        @{ file = $videoPath; old = $OldDxgiRenderResult; new = $NewDxgiRenderResult; label = "video_output.cc: commit/report_swap only when render succeeds" },
+        @{ file = $videoPath; old = $OldDxgiGpuAcquireNullGuard; new = $NewDxgiGpuAcquireNullGuard; label = "video_output.cc: guard null ConsumerAcquire handle" }
     )
 }
 
@@ -984,7 +1273,7 @@ if ($useAngle) {
 $states = @{}
 $filesToPatch = @($videoPath, $videoHeaderPath, $utilsPath)
 if ($useAngle) { $filesToPatch += @($headerPath, $anglePath) }
-if ($useDxgi) { $filesToPatch += @($mailboxPath) }
+if ($useDxgi) { $filesToPatch += @($d3dRendererPath, $mailboxPath, $mailboxHeaderPath) }
 foreach ($p in $filesToPatch) {
     $states[$p] = Get-Normalized $p
 }

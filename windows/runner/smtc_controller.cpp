@@ -139,12 +139,15 @@ bool SmtcController::Initialize(HWND hwnd, flutter::BinaryMessenger* messenger) 
   smtc_.As(&smtc2_);
   smtc_->get_DisplayUpdater(&display_updater_);
 
-  // Register ButtonPressed callback
+  // Register ButtonPressed callback (agile via FtmBase so MTA WinRT callbacks never stall or fail COM STA marshaling)
   auto button_handler = Microsoft::WRL::Callback<
-      ABI::Windows::Foundation::ITypedEventHandler<
-          ABI::Windows::Media::SystemMediaTransportControls*,
-          ABI::Windows::Media::
-              SystemMediaTransportControlsButtonPressedEventArgs*>>(
+      Microsoft::WRL::Implements<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          ABI::Windows::Foundation::ITypedEventHandler<
+              ABI::Windows::Media::SystemMediaTransportControls*,
+              ABI::Windows::Media::
+                  SystemMediaTransportControlsButtonPressedEventArgs*>,
+          Microsoft::WRL::FtmBase>>(
       [this](ABI::Windows::Media::ISystemMediaTransportControls*,
              ABI::Windows::Media::
                  ISystemMediaTransportControlsButtonPressedEventArgs* args)
@@ -190,9 +193,12 @@ bool SmtcController::Initialize(HWND hwnd, flutter::BinaryMessenger* messenger) 
   // Register PlaybackPositionChangeRequested callback if SMTC2 is supported
   if (smtc2_) {
     auto seek_handler = Microsoft::WRL::Callback<
-        ABI::Windows::Foundation::ITypedEventHandler<
-            ABI::Windows::Media::SystemMediaTransportControls*,
-            ABI::Windows::Media::PlaybackPositionChangeRequestedEventArgs*>>(
+        Microsoft::WRL::Implements<
+            Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+            ABI::Windows::Foundation::ITypedEventHandler<
+                ABI::Windows::Media::SystemMediaTransportControls*,
+                ABI::Windows::Media::PlaybackPositionChangeRequestedEventArgs*>,
+            Microsoft::WRL::FtmBase>>(
         [this](ABI::Windows::Media::ISystemMediaTransportControls*,
                ABI::Windows::Media::IPlaybackPositionChangeRequestedEventArgs*
                    args) -> HRESULT {
@@ -339,6 +345,9 @@ void SmtcController::UpdateMediaItem(const flutter::EncodableMap& args) {
     }
   }
 
+  if (smtc_) {
+    smtc_->put_IsEnabled(TRUE);
+  }
   display_updater_->Update();
 
   if (!thumb_bytes.empty()) {
@@ -407,7 +416,10 @@ void SmtcController::StartThumbnailWrite(const std::vector<uint8_t>& bytes) {
 
   std::shared_ptr<ThumbnailAsyncState> shared = thumb_state_;
   auto handler = Microsoft::WRL::Callback<
-      ABI::Windows::Foundation::IAsyncOperationCompletedHandler<UINT32>>(
+      Microsoft::WRL::Implements<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          ABI::Windows::Foundation::IAsyncOperationCompletedHandler<UINT32>,
+          Microsoft::WRL::FtmBase>>(
       [shared, gen, mem_stream, writer](
           ABI::Windows::Foundation::IAsyncOperation<UINT32>* async_info,
           ABI::Windows::Foundation::AsyncStatus status) -> HRESULT {

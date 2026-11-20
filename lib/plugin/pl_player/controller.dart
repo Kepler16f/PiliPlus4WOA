@@ -637,7 +637,7 @@ class PlPlayerController with BlockConfigMixin, PlayerVolumeMixin {
   }
 
   static Future<void>? playIfExists() {
-    return _playCallBack?.call();
+    return _playCallBack?.call() ?? _instance?.play();
   }
 
   /// ARM64 修改版：让当前视频页重新拉取播放链接并续播。

@@ -9,6 +9,7 @@
 #include <SystemMediaTransportControlsInterop.h>
 #include <wrl/client.h>
 #include <wrl/event.h>
+#include <wrl/implements.h>
 #include <wrl/wrappers/corewrappers.h>
 
 #include <flutter/binary_messenger.h>

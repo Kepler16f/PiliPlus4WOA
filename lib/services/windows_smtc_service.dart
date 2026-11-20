@@ -36,6 +36,7 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
   int _durationMs = 0;
   String? _currentMediaId;
   int _artworkRequestToken = 0;
+  bool _sessionActive = false;
   final Map<String, Uint8List> _thumbnailCache = <String, Uint8List>{};
 
   static bool isJpegOrPng(Uint8List bytes) {
@@ -234,6 +235,7 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
     final item = request.mediaItem;
     _durationMs = item.duration?.inMilliseconds ?? 0;
     _currentMediaId = item.id;
+    _sessionActive = true;
     final token = ++_artworkRequestToken;
 
     String? artCacheFile = item.extras?['artCacheFile'] as String?;
@@ -312,6 +314,11 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
   @override
   Future<void> setState(SetStateRequest request) async {
     final state = request.state;
+    if (state.processingState == AudioProcessingStateMessage.idle) {
+      _sessionActive = false;
+    } else {
+      _sessionActive = true;
+    }
     final canPlay =
         state.controls.any((c) => c.action == MediaActionMessage.play);
     final canPause =
@@ -356,6 +363,12 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
 
   @override
   Future<void> stopService(StopServiceRequest request) async {
+    // Guard against AudioService._observePlaybackState() emitting a delayed
+    // _stop() after a new video has already started and called setMediaItem().
+    if (_sessionActive && _currentMediaId != null) {
+      return;
+    }
+    _sessionActive = false;
     _durationMs = 0;
     _currentMediaId = null;
     _artworkRequestToken++;
