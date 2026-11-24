@@ -18,7 +18,7 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
   WindowsSmtcAudioService({
     this.thumbnailLoader,
     ThumbnailNormalizer? thumbnailNormalizer,
-    this.httpFallbackDelay = const Duration(milliseconds: 350),
+    this.httpFallbackDelay = Duration.zero,
   }) : _thumbnailNormalizer =
             thumbnailNormalizer ?? defaultNormalizeThumbnailBytes {
     _channel.setMethodCallHandler(_handleNativeMethodCall);
@@ -35,9 +35,17 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
   AudioHandlerCallbacks? _callbacks;
   int _durationMs = 0;
   String? _currentMediaId;
+  MediaItemMessage? _currentMediaItem;
   int _artworkRequestToken = 0;
   bool _sessionActive = false;
+  String? _lastSentThumbMediaId;
+  String? _lastSentThumbCacheKey;
+  String? _inFlightThumbKey;
+  Future<void>? _pendingThumbnailFuture;
   final Map<String, Uint8List> _thumbnailCache = <String, Uint8List>{};
+
+  @visibleForTesting
+  Future<void>? get pendingThumbnailFuture => _pendingThumbnailFuture;
 
   static bool isJpegOrPng(Uint8List bytes) {
     if (bytes.length >= 3 &&
@@ -233,10 +241,11 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
   @override
   Future<void> setMediaItem(SetMediaItemRequest request) async {
     final item = request.mediaItem;
+    final mediaChanged = _currentMediaId != item.id;
     _durationMs = item.duration?.inMilliseconds ?? 0;
     _currentMediaId = item.id;
+    _currentMediaItem = item;
     _sessionActive = true;
-    final token = ++_artworkRequestToken;
 
     String? artCacheFile = item.extras?['artCacheFile'] as String?;
     if (artCacheFile == null && item.artUri?.isScheme('file') == true) {
@@ -248,13 +257,31 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
     final cacheKey = (item.artUri?.toString().isNotEmpty ?? false)
         ? item.artUri!.toString()
         : artCacheFile;
-    final cachedBytes = cacheKey != null ? _thumbnailCache[cacheKey] : null;
+    final hasCacheKey = cacheKey != null && cacheKey.isNotEmpty;
+
+    if (mediaChanged || (hasCacheKey && cacheKey != _lastSentThumbCacheKey)) {
+      _lastSentThumbMediaId = null;
+      _lastSentThumbCacheKey = null;
+    }
+
+    final cachedBytes = hasCacheKey ? _thumbnailCache[cacheKey] : null;
+    final alreadySentThumb =
+        hasCacheKey &&
+        _lastSentThumbMediaId == item.id &&
+        _lastSentThumbCacheKey == cacheKey;
+
+    final immediateThumbBytes =
+        (!alreadySentThumb && cachedBytes != null) ? cachedBytes : null;
 
     try {
       await _channel.invokeMethod(
         'setMediaItem',
-        _buildMediaPayload(item, thumbnailBytes: cachedBytes),
+        _buildMediaPayload(item, thumbnailBytes: immediateThumbBytes),
       );
+      if (immediateThumbBytes != null) {
+        _lastSentThumbMediaId = item.id;
+        _lastSentThumbCacheKey = cacheKey;
+      }
     } catch (e) {
       if (kDebugMode) {
         debugPrint('WindowsSmtcAudioService setMediaItem error: $e');
@@ -262,51 +289,97 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
       return;
     }
 
-    if (cachedBytes != null ||
-        (cacheKey == null || cacheKey.isEmpty)) {
+    if (alreadySentThumb || cachedBytes != null || !hasCacheKey) {
+      if (mediaChanged) {
+        _artworkRequestToken++;
+        _inFlightThumbKey = null;
+      }
       return;
     }
 
-    // AudioService 在网络封面未命中缓存时会先发一次不带 artCacheFile 的请求，
-    // 并在后台下载完成后补发第二次；若 350ms 内未等到本地缓存文件，则用内部 Dio 兜底下载。
+    final flightKey = '${item.id}|$cacheKey';
     final isLocalReady =
         (artCacheFile != null && artCacheFile.isNotEmpty) ||
         (item.artUri?.isScheme('file') ?? false);
-    if (!isLocalReady && httpFallbackDelay > Duration.zero) {
-      await Future<void>.delayed(httpFallbackDelay);
-      if (token != _artworkRequestToken || _currentMediaId != item.id) {
+    // If the exact same mediaId + cover is already downloading in flight (e.g.
+    // preview metadata was refined by full video detail), do not abort and
+    // restart the download unless this update brought a ready local cache file.
+    if (!mediaChanged && _inFlightThumbKey == flightKey && !isLocalReady) {
+      return;
+    }
+
+    final token = ++_artworkRequestToken;
+    _inFlightThumbKey = flightKey;
+    final future = _loadAndSendThumbnail(
+      mediaId: item.id,
+      artUri: item.artUri,
+      artCacheFile: artCacheFile,
+      cacheKey: cacheKey,
+      flightKey: flightKey,
+      token: token,
+      isLocalReady: isLocalReady,
+    );
+    _pendingThumbnailFuture = future;
+    unawaited(future);
+  }
+
+  Future<void> _loadAndSendThumbnail({
+    required String mediaId,
+    required Uri? artUri,
+    required String? artCacheFile,
+    required String cacheKey,
+    required String flightKey,
+    required int token,
+    required bool isLocalReady,
+  }) async {
+    try {
+      if (!isLocalReady && httpFallbackDelay > Duration.zero) {
+        await Future<void>.delayed(httpFallbackDelay);
+        if (token != _artworkRequestToken || _currentMediaId != mediaId) {
+          return;
+        }
+      }
+
+      final rawBytes = thumbnailLoader != null
+          ? await thumbnailLoader!(artCacheFile, artUri)
+          : await _defaultLoadRawThumbnail(artCacheFile, artUri);
+      if (rawBytes == null ||
+          rawBytes.isEmpty ||
+          token != _artworkRequestToken ||
+          _currentMediaId != mediaId) {
         return;
       }
-    }
 
-    final rawBytes = thumbnailLoader != null
-        ? await thumbnailLoader!(artCacheFile, item.artUri)
-        : await _defaultLoadRawThumbnail(artCacheFile, item.artUri);
-    if (rawBytes == null ||
-        rawBytes.isEmpty ||
-        token != _artworkRequestToken ||
-        _currentMediaId != item.id) {
-      return;
-    }
+      final normalized = await _thumbnailNormalizer(rawBytes);
+      if (normalized == null ||
+          normalized.isEmpty ||
+          token != _artworkRequestToken ||
+          _currentMediaId != mediaId) {
+        return;
+      }
 
-    final normalized = await _thumbnailNormalizer(rawBytes);
-    if (normalized == null ||
-        normalized.isEmpty ||
-        token != _artworkRequestToken ||
-        _currentMediaId != item.id) {
-      return;
-    }
+      _cacheThumbnail(cacheKey, normalized);
 
-    _cacheThumbnail(cacheKey, normalized);
+      final latestItem = _currentMediaItem;
+      if (latestItem == null || latestItem.id != mediaId) {
+        return;
+      }
 
-    try {
       await _channel.invokeMethod(
         'setMediaItem',
-        _buildMediaPayload(item, thumbnailBytes: normalized),
+        _buildMediaPayload(latestItem, thumbnailBytes: normalized),
       );
+      if (_currentMediaId == mediaId) {
+        _lastSentThumbMediaId = mediaId;
+        _lastSentThumbCacheKey = cacheKey;
+      }
     } catch (e) {
       if (kDebugMode) {
         debugPrint('WindowsSmtcAudioService setThumbnail error: $e');
+      }
+    } finally {
+      if (_inFlightThumbKey == flightKey && token == _artworkRequestToken) {
+        _inFlightThumbKey = null;
       }
     }
   }
@@ -371,6 +444,10 @@ class WindowsSmtcAudioService extends AudioServicePlatform {
     _sessionActive = false;
     _durationMs = 0;
     _currentMediaId = null;
+    _currentMediaItem = null;
+    _lastSentThumbMediaId = null;
+    _lastSentThumbCacheKey = null;
+    _inFlightThumbKey = null;
     _artworkRequestToken++;
     try {
       await _channel.invokeMethod('clear');

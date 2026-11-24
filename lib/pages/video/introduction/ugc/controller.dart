@@ -13,6 +13,7 @@ import 'package:PiliPlus/http/search.dart';
 import 'package:PiliPlus/http/user.dart';
 import 'package:PiliPlus/http/video.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
+import 'package:PiliPlus/models_new/media_list/media_list.dart';
 import 'package:PiliPlus/models_new/member_card_info/data.dart';
 import 'package:PiliPlus/models_new/relation/data.dart';
 import 'package:PiliPlus/models_new/video/video_ai_conclusion/model_result.dart';
@@ -90,14 +91,26 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
         }
       });
     }
-    videoDetail.value.title = Get.arguments['title'] ?? '';
+    final argTitle = Get.arguments['title'] as String?;
+    final argCover = Get.arguments['cover'] as String?;
+    videoDetail.value.title = argTitle ?? '';
+    videoPlayerServiceHandler?.onVideoPreviewChange(
+      cid: cid.value,
+      herotag: heroTag,
+      title: argTitle,
+      cover: argCover,
+    );
   }
 
   // 获取视频简介&分p
   @override
   Future<void> queryVideoIntro() async {
+    final requestBvid = bvid;
     queryVideoTags();
-    final res = await VideoHttp.videoIntro(bvid: bvid);
+    final res = await VideoHttp.videoIntro(bvid: requestBvid);
+    if (isClosed || bvid != requestBvid) {
+      return;
+    }
     if (res case Success(:final response)) {
       if (response.redirectUrl != null &&
           videoDetailCtr.epId == null &&
@@ -565,6 +578,33 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
           videoDetailCtr.cover.value = cover;
         }
 
+        // Immediately push the new episode's known title & cover to system
+        // media controls (Windows SMTC) before async videoIntro completes.
+        String? previewTitle = episode.title;
+        String? previewArtist;
+        Duration? previewDuration;
+        if (episode is MediaListItemModel) {
+          previewArtist = episode.upper?.name;
+          if (episode.duration case final sec? when sec > 0) {
+            previewDuration = Duration(seconds: sec);
+          }
+        } else if (episode is EpisodeItem) {
+          previewTitle = episode.title ?? episode.arc?.title;
+          previewArtist = episode.arc?.author?.name;
+          final sec = episode.arc?.duration ?? episode.page?.duration;
+          if (sec != null && sec > 0) {
+            previewDuration = Duration(seconds: sec);
+          }
+        }
+        videoPlayerServiceHandler?.onVideoPreviewChange(
+          cid: cid,
+          herotag: heroTag,
+          title: previewTitle,
+          artist: previewArtist,
+          cover: cover,
+          duration: previewDuration,
+        );
+
         // 重新请求相关视频
         if (videoDetailCtr.plPlayerController.showRelatedVideo) {
           try {
@@ -596,6 +636,12 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
             heroTag,
             artist: videoDetail.owner?.name,
             cover: videoDetail.pic,
+          );
+        } else {
+          videoPlayerServiceHandler?.onVideoDetailChange(
+            videoDetail.value,
+            cid,
+            heroTag,
           );
         }
       }
@@ -835,6 +881,7 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
           aid: firstItem.aid,
           bvid: firstItem.bvid,
           cid: firstItem.cid,
+          title: firstItem.title,
           cover: firstItem.cover,
         ),
       );

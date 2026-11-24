@@ -433,6 +433,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     );
     PlPlayerController.setReloadCallBack(reloadPlayUrlCallback);
     _bindMediaSkipHandlers();
+    videoPlayerServiceHandler?.activateHeroTag(heroTag);
 
     introController.startTimer();
 

@@ -317,9 +317,16 @@ void SmtcController::UpdateMediaItem(const flutter::EncodableMap& args) {
   if (media_changed) {
     current_media_id_ = media_id;
     thumb_state_->latest_generation.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(thumb_state_->mutex);
+      thumb_state_->ready_stream.Reset();
+    }
     thumbnail_ref_.Reset();
     thumbnail_stream_.Reset();
-    display_updater_->put_Thumbnail(nullptr);
+    // Clear all stale metadata and thumbnail from the previous video before
+    // populating the new item so Windows 11 Quick Settings never retains old
+    // fields or cover artwork.
+    display_updater_->ClearAll();
   }
 
   // Use Music display properties (like Chromium SMTC) so Windows 11 Quick
@@ -335,13 +342,11 @@ void SmtcController::UpdateMediaItem(const flutter::EncodableMap& args) {
     music_props->put_Title(HStringReference(title_w.c_str()).Get());
     music_props->put_Artist(HStringReference(artist_w.c_str()).Get());
 
-    if (!album.empty()) {
-      Microsoft::WRL::ComPtr<ABI::Windows::Media::IMusicDisplayProperties2>
-          music_props2;
-      if (SUCCEEDED(music_props.As(&music_props2)) && music_props2) {
-        std::wstring album_w = Utf8ToWide(album);
-        music_props2->put_AlbumTitle(HStringReference(album_w.c_str()).Get());
-      }
+    Microsoft::WRL::ComPtr<ABI::Windows::Media::IMusicDisplayProperties2>
+        music_props2;
+    if (SUCCEEDED(music_props.As(&music_props2)) && music_props2) {
+      std::wstring album_w = Utf8ToWide(album);
+      music_props2->put_AlbumTitle(HStringReference(album_w.c_str()).Get());
     }
   }
 

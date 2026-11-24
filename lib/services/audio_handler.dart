@@ -51,7 +51,7 @@ typedef SkipHandlers = ({
 });
 
 class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
-  static final List<MediaItem> _item = [];
+  final Map<String, MediaItem> _itemsByHeroTag = {};
   bool enableBackgroundPlay = Pref.enableBackgroundPlay;
 
   bool Function()? isPlaying;
@@ -67,6 +67,9 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   SkipHandlers? get _activeSkipHandlers =>
       _activeHeroTag != null ? _skipHandlers[_activeHeroTag!] : null;
+
+  MediaItem? get _activeMediaItem =>
+      _activeHeroTag != null ? _itemsByHeroTag[_activeHeroTag!] : null;
 
   void setSkipHandlers(
     String herotag, {
@@ -87,9 +90,23 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     refreshPlaybackState();
   }
 
+  /// Re-activates an existing video page's metadata and playback controls when
+  /// returning to it (e.g. via `didPopNext`).
+  void activateHeroTag(String herotag) {
+    if (!enableBackgroundPlay) return;
+    _heroTagStack
+      ..remove(herotag)
+      ..add(herotag);
+    final item = _itemsByHeroTag[herotag];
+    if (item != null) {
+      setMediaItem(item);
+      refreshPlaybackState();
+    }
+  }
+
   void refreshPlaybackState() {
     final last = _lastConfig;
-    if (!enableBackgroundPlay || _item.isEmpty || last == null) return;
+    if (!enableBackgroundPlay || _itemsByHeroTag.isEmpty || last == null) return;
     onUpdateState(
       last.$1,
       last.$2,
@@ -153,7 +170,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     required double speed,
     String? debugLabel,
   }) {
-    if (!enableBackgroundPlay || _item.isEmpty) {
+    if (!enableBackgroundPlay || _itemsByHeroTag.isEmpty) {
       return;
     }
 
@@ -256,6 +273,49 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  static Uri? _coverUri(String? cover) => (cover == null || cover.isEmpty)
+      ? null
+      : Uri.parse(ImageUtils.safeThumbnailUrl(cover));
+
+  void _pushMediaItem(String herotag, MediaItem item) {
+    _heroTagStack
+      ..remove(herotag)
+      ..add(herotag);
+    _itemsByHeroTag[herotag] = item;
+    setMediaItem(item);
+    refreshPlaybackState();
+  }
+
+  /// Pushes immediately-available metadata (e.g. from route arguments or an
+  /// episode item) before async detail endpoints return so system media
+  /// controls (Windows SMTC) update without staying stuck on the previous video.
+  void onVideoPreviewChange({
+    required int cid,
+    required String herotag,
+    String? title,
+    String? artist,
+    String? album,
+    String? cover,
+    Duration? duration,
+  }) {
+    if (!enableBackgroundPlay) return;
+    final cleanTitle = title?.trim() ?? '';
+    final cleanCover = cover?.trim() ?? '';
+    if (cleanTitle.isEmpty && cleanCover.isEmpty) return;
+
+    _pushMediaItem(
+      herotag,
+      MediaItem(
+        id: '$cid$herotag',
+        title: cleanTitle,
+        artist: artist,
+        album: album,
+        duration: duration,
+        artUri: _coverUri(cleanCover),
+      ),
+    );
+  }
+
   void onVideoDetailChange(
     dynamic data,
     int cid,
@@ -270,10 +330,6 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     // }
     if (data == null) return;
 
-    Uri? getUri(String? cover) => (cover == null || cover.isEmpty)
-        ? null
-        : Uri.parse(ImageUtils.safeThumbnailUrl(cover));
-
     late final id = '$cid$herotag';
     final MediaItem mediaItem;
     switch (data) {
@@ -286,7 +342,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
             album: data.title,
             artist: data.owner?.name,
             duration: Duration(seconds: current?.duration ?? 0),
-            artUri: getUri(data.pic),
+            artUri: _coverUri(data.pic),
           );
         } else {
           mediaItem = MediaItem(
@@ -294,7 +350,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
             title: data.title ?? '',
             artist: data.owner?.name,
             duration: Duration(seconds: data.duration ?? 0),
-            artUri: getUri(data.pic),
+            artUri: _coverUri(data.pic),
           );
         }
       case EpisodeItem():
@@ -305,14 +361,14 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
           duration: data.from == 'pugv'
               ? Duration(seconds: data.duration ?? 0)
               : Duration(milliseconds: data.duration ?? 0),
-          artUri: getUri(data.cover),
+          artUri: _coverUri(data.cover),
         );
       case RoomInfoH5Data():
         mediaItem = MediaItem(
           id: id,
           title: data.roomInfo?.title ?? '',
           artist: data.anchorInfo?.baseInfo?.uname,
-          artUri: getUri(data.roomInfo?.cover),
+          artUri: _coverUri(data.roomInfo?.cover),
           isLive: true,
         );
       case Part():
@@ -321,7 +377,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
           title: data.part ?? '',
           artist: artist,
           duration: Duration(seconds: data.duration ?? 0),
-          artUri: getUri(cover),
+          artUri: _coverUri(cover),
         );
       case DetailItem(:final arc):
         mediaItem = MediaItem(
@@ -329,7 +385,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
           title: arc.title,
           artist: data.owner.name,
           duration: Duration(seconds: arc.duration.toInt()),
-          artUri: getUri(arc.cover),
+          artUri: _coverUri(arc.cover),
         );
       case BiliDownloadEntryInfo():
         final coverFile = File(
@@ -337,7 +393,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
         );
         final uri = coverFile.existsSync()
             ? coverFile.absolute.uri
-            : getUri(data.cover);
+            : _coverUri(data.cover);
         mediaItem = MediaItem(
           id: id,
           title: data.showTitle,
@@ -348,24 +404,19 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
       default:
         return;
     }
-    _heroTagStack
-      ..remove(herotag)
-      ..add(herotag);
-    _item.add(mediaItem);
-    setMediaItem(mediaItem);
-    refreshPlaybackState();
+    _pushMediaItem(herotag, mediaItem);
   }
 
   void onVideoDetailDispose(String herotag) {
+    final wasActive = _activeHeroTag == herotag;
     _skipHandlers.remove(herotag);
     _heroTagStack.remove(herotag);
-    if (!enableBackgroundPlay) return;
+    _itemsByHeroTag.remove(herotag);
+    if (!enableBackgroundPlay || !wasActive) return;
 
-    if (_item.isNotEmpty) {
-      _item.removeWhere((item) => item.id.endsWith(herotag));
-    }
-    if (_item.isNotEmpty) {
-      setMediaItem(_item.last);
+    final nextActive = _activeMediaItem;
+    if (nextActive != null) {
+      setMediaItem(nextActive);
       final canPrev = _activeSkipHandlers?.canSkipToPrevious?.call() ?? false;
       final canNext = _activeSkipHandlers?.canSkipToNext?.call() ?? false;
       playbackState.add(
@@ -384,15 +435,15 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   void clearIfNeeded() {
     if (!enableBackgroundPlay) return;
-    if (_item.isEmpty) clear();
+    if (_itemsByHeroTag.isEmpty) clear();
   }
 
   void clear() {
     _skipHandlers.clear();
     _heroTagStack.clear();
+    _itemsByHeroTag.clear();
     if (!enableBackgroundPlay) return;
     mediaItem.add(null);
-    _item.clear();
     _lastPos = null;
     _lastConfig = null;
     /**

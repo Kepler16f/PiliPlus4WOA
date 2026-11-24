@@ -129,10 +129,8 @@ void main() {
         ),
       ),
     );
-
-    expect(loadCount, 1);
-    expect(normalizeCount, 1);
-    expect(methodCalls, hasLength(2));
+    // Metadata call is sent immediately without blocking on thumbnail I/O.
+    expect(methodCalls, hasLength(1));
     expect(methodCalls.first.arguments['mediaId'], 'test_1');
     expect(methodCalls.first.arguments['title'], 'Test Video');
     expect(methodCalls.first.arguments['artist'], 'Test UP');
@@ -140,8 +138,30 @@ void main() {
     expect(methodCalls.first.arguments['durationMs'], 120000);
     expect(methodCalls.first.arguments['thumbnailBytes'], isNull);
 
+    await service.pendingThumbnailFuture;
+
+    expect(loadCount, 1);
+    expect(normalizeCount, 1);
+    expect(methodCalls, hasLength(2));
     expect(methodCalls.last.arguments['mediaId'], 'test_1');
     expect(methodCalls.last.arguments['thumbnailBytes'], equals(pngBytes));
+
+    // Duplicate callback for the same mediaId & cover does not re-send thumbnailBytes.
+    methodCalls.clear();
+    await service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'test_1',
+          title: 'Test Video',
+          artist: 'Test UP',
+          artUri: Uri.parse('https://i0.hdslb.com/bfs/archive/test.jpg@1q.webp'),
+          extras: const {'artCacheFile': r'C:\cache\art.webp'},
+        ),
+      ),
+    );
+    expect(loadCount, 1);
+    expect(methodCalls, hasLength(1));
+    expect(methodCalls.first.arguments['thumbnailBytes'], isNull);
 
     // Second item with the same artUri hits in-memory cache immediately
     methodCalls.clear();
@@ -160,6 +180,54 @@ void main() {
     expect(methodCalls.first.arguments['thumbnailBytes'], equals(pngBytes));
   });
 
+  test('refining metadata for same mediaId keeps in-flight thumbnail and applies latest fields', () async {
+    final completer = Completer<Uint8List?>();
+    int loadCount = 0;
+    service = WindowsSmtcAudioService(
+      httpFallbackDelay: Duration.zero,
+      thumbnailLoader: (artCacheFile, artUri) {
+        loadCount++;
+        return completer.future;
+      },
+      thumbnailNormalizer: (raw) async => raw,
+    );
+
+    // Preview metadata arrives immediately on switch.
+    await service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'vid_100',
+          title: 'Preview Title',
+          artUri: Uri.parse('https://example.com/cover100.jpg'),
+        ),
+      ),
+    );
+    // Full metadata arrives while thumbnail is still downloading.
+    await service.setMediaItem(
+      SetMediaItemRequest(
+        mediaItem: MediaItemMessage(
+          id: 'vid_100',
+          title: 'Full Title',
+          artist: 'Real UP',
+          duration: const Duration(seconds: 180),
+          artUri: Uri.parse('https://example.com/cover100.jpg'),
+        ),
+      ),
+    );
+
+    // Must not abort and restart the in-flight thumbnail download.
+    expect(loadCount, 1);
+
+    completer.complete(jpegBytes);
+    await service.pendingThumbnailFuture;
+
+    expect(methodCalls.last.arguments['mediaId'], 'vid_100');
+    expect(methodCalls.last.arguments['title'], 'Full Title');
+    expect(methodCalls.last.arguments['artist'], 'Real UP');
+    expect(methodCalls.last.arguments['durationMs'], 180000);
+    expect(methodCalls.last.arguments['thumbnailBytes'], equals(jpegBytes));
+  });
+
   test('setMediaItem drops stale thumbnail when media switches mid-load', () async {
     final completer = Completer<Uint8List?>();
     service = WindowsSmtcAudioService(
@@ -173,7 +241,7 @@ void main() {
       thumbnailNormalizer: (raw) async => raw,
     );
 
-    final firstCall = service.setMediaItem(
+    await service.setMediaItem(
       SetMediaItemRequest(
         mediaItem: MediaItemMessage(
           id: 'first',
@@ -182,6 +250,7 @@ void main() {
         ),
       ),
     );
+    final firstThumbFuture = service.pendingThumbnailFuture;
 
     await service.setMediaItem(
       SetMediaItemRequest(
@@ -192,16 +261,24 @@ void main() {
         ),
       ),
     );
+    await service.pendingThumbnailFuture;
 
     completer.complete(pngBytes);
-    await firstCall;
+    await firstThumbFuture;
 
-    final secondThumbCalls = methodCalls.where(
+    final staleFirstThumbCalls = methodCalls.where(
       (c) =>
           c.arguments['mediaId'] == 'first' &&
           c.arguments['thumbnailBytes'] != null,
     );
-    expect(secondThumbCalls, isEmpty);
+    expect(staleFirstThumbCalls, isEmpty);
+
+    final secondThumbCalls = methodCalls.where(
+      (c) =>
+          c.arguments['mediaId'] == 'second' &&
+          c.arguments['thumbnailBytes'] != null,
+    );
+    expect(secondThumbCalls, hasLength(1));
   });
 
   test('setState maps controls and systemActions skip/seek capabilities', () async {
